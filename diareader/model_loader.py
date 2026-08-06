@@ -281,6 +281,9 @@ def load_model(
         tcc = compile_support.ensure_c_compiler()
         if tcc:
             log.info("Using the bundled C compiler at %s", tcc)
+        headers = compile_support.use_bundled_python_headers()
+        if headers:
+            log.info("Compiling against the bundled CPython headers at %s", headers)
 
         stage("Checking torch.compile works on this machine…")
         usable, detail = compile_support.probe(torch)

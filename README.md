@@ -400,6 +400,36 @@ identical-length sentences in one sample), because decoding is stochastic.
   rather than none of it — compiles cleanly and silently forfeits the whole 1.56x,
   and a bare `x * 2 + 1` never asks dynamo to trace into `torch.nn`, so it cannot
   tell the two apart.
+
+  **The packaged build must also carry the toolchain the compile needs.** Inductor
+  builds a small CPython extension per GPU kernel *at run time, on the user's
+  machine*: it shells out to a C compiler, `#include`s `Python.h`, and links
+  `pythonNNN.lib`. Triton locates all three through `sysconfig` and
+  `sys.base_exec_prefix`, which inside a bundle still name the **build** machine's
+  Python installation — and PyInstaller ships none of them, because nothing in an
+  ordinary frozen app compiles C.
+
+  Every one of those resolved happily on the machine that built the installer and
+  was missing on the machine it was carried to, one layer at a time: first "Failed
+  to find C compiler", then, once `compile_support` pointed at the bundled TinyCC,
+  `include file 'Python.h' not found`. Measured against the bundled compiler
+  directly — with the build machine's Python: builds; with none: fails on `Python.h`;
+  with headers and import library copied into the bundle: builds. The spec now ships
+  `pybuild/Include` (214 headers, 1.3 MB) and `pybuild/libs`.
+
+  **The rule worth keeping: every input to a run-time compile must live inside the
+  installed folder.** Anything resolved from the build machine works perfectly until
+  the app is moved, which is the one condition local testing never covers. The
+  selftest now checks each input for exactly that and fails if any of them points
+  outside the app directory — a test that passes on the build machine is not
+  evidence, so the check has to be about *where the path is*, not whether it worked.
+
+  One related trap, in the error message rather than the code: it recommended
+  installing MSVC, while `ensure_c_compiler` sets `CC` to the bundled compiler and
+  therefore ignores MSVC entirely. Following that advice cost someone a multi-gigabyte
+  install and produced the identical error. **Advice in an error message is part of
+  the program and can be wrong in the same ways** — `CC` is now named as the override
+  that actually takes effect.
 - **TF32 (`use_tf32` in Settings) is ~1.22x faster and costs accuracy.** A 69-sentence
   chapter exported with it dropped words mid-sentence three times — heard by ear, and
   confirmed against the text at 68%, 75% and 78% coverage — where a 60-sentence fp32 run

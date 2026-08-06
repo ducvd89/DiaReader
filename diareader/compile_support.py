@@ -30,10 +30,30 @@ function and dropping those caches fixes the whole chain.
 Inductor compiles the launcher for every generated kernel with a *host* C compiler,
 at run time, on the user's machine. Triton ships a TinyCC for machines without
 Visual Studio, but looks for it under `sysconfig.get_paths()["platlib"]`, which in a
-bundle points at a directory that does not exist. On a machine with no other
-compiler that raises "Failed to find C compiler" once per sentence.
+bundle still names the *build* machine's site-packages. That path exists on the
+machine that built the app, so the compiler is found and everything works; anywhere
+else it raises "Failed to find C compiler" once per sentence.
 
-3. Whether it works at all
+3. What the compiler compiles against
+-------------------------------------
+Finding the compiler is not enough. The launcher is a CPython extension: it
+`#include`s Python.h and links against pythonNNN.lib. Triton locates both through
+sysconfig and sys.base_exec_prefix — which, in a frozen app, again name the build
+machine's Python installation. PyInstaller ships neither headers nor the import
+library, because nothing in a normal frozen app ever compiles C.
+
+So the second machine got one directory further and failed the same way:
+"include file 'Python.h' not found". Measured directly against the bundled TinyCC —
+real Python install: builds; no Python install: fails on Python.h; headers and
+import library copied into the bundle: builds. The spec therefore ships
+`pybuild/Include` and `pybuild/libs`, and `use_bundled_python_headers()` points
+triton at them.
+
+The rule the last three bugs all break: **every input to a run-time compile must
+live inside the installed folder.** Anything resolved from the build machine works
+perfectly until the app is moved. `selftest` now checks each of them for that.
+
+4. Whether it works at all
 --------------------------
 `probe()` compiles something trivial before any book is touched. It exists because
 the alternative is finding out per sentence: compilation fails the same way on every
@@ -46,6 +66,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 
 def _posix(path: str) -> str:
@@ -100,6 +121,58 @@ def ensure_c_compiler() -> str | None:
     return str(tcc)
 
 
+# Where the spec puts CPython's headers and import library inside the bundle.
+BUNDLED_PYBUILD = "pybuild"
+
+
+def bundled_python_build_dirs() -> tuple[Path, Path] | None:
+    """(include, libs) shipped in the bundle, or None if this build has none."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base is None:
+        return None
+    include = Path(base) / BUNDLED_PYBUILD / "Include"
+    libs = Path(base) / BUNDLED_PYBUILD / "libs"
+    if not (include / "Python.h").is_file() or not any(libs.glob("python*.lib")):
+        return None
+    return include, libs
+
+
+def use_bundled_python_headers() -> str | None:
+    """Compile against the bundle's own CPython headers and import library.
+
+    Both are otherwise taken from the machine that built the app: the headers from
+    sysconfig, the import library from sys.base_exec_prefix/libs. Neither path
+    exists on a machine without Python installed, and the compile fails at
+    "#include <Python.h>".
+    """
+    dirs = bundled_python_build_dirs()
+    if dirs is None:
+        return None
+    include, libs = dirs
+
+    import sysconfig
+
+    import triton.runtime.build as triton_build
+
+    # Narrow on purpose: only the "include" key changes, and only to a directory
+    # that exists. What it replaces is a path on somebody else's computer.
+    if not getattr(sysconfig.get_paths, "_diareader_bundled", False):
+        original_get_paths = sysconfig.get_paths
+
+        def get_paths(*args, **kwargs):
+            paths = dict(original_get_paths(*args, **kwargs))
+            paths["include"] = str(include)
+            return paths
+
+        get_paths._diareader_bundled = True
+        sysconfig.get_paths = get_paths
+
+    # triton.runtime.build calls this by module-global name; it is lru_cached in
+    # windows_utils and would otherwise return the build machine's libs directory.
+    triton_build.find_python = lambda: [str(libs)]
+    return f"{include}"
+
+
 def c_compiler() -> tuple[bool, str]:
     """(found, description) — what inductor will shell out to on this machine."""
     try:
@@ -131,28 +204,37 @@ def probe(torch_module) -> tuple[bool, str]:
 
 
 def remedy(detail: str) -> str:
-    """What to install, for a machine where torch.compile will not run."""
+    """What to do on a machine where torch.compile will not run.
+
+    Says only things that can actually take effect. An earlier version of this text
+    recommended installing MSVC — which this module then ignored, because it sets CC
+    to the bundled compiler itself. Someone followed those instructions, installed
+    several gigabytes of build tools, and got the identical error back.
+    """
     found, cc = c_compiler()
     compiler_line = (
-        f"The C compiler it found is:\n    {cc}\n"
-        if found else
-        f"No C compiler could be found ({cc}).\n"
+        f"Compiler:      {cc}\n" if found else f"Compiler:      none found ({cc})\n"
+    )
+    dirs = bundled_python_build_dirs()
+    headers_line = (
+        f"Headers:       {dirs[0]}\n" if dirs else
+        "Headers:       NOT BUNDLED — this build cannot compile on a machine\n"
+        "               without Python installed. Rebuild the installer.\n"
     )
     return (
         "torch.compile is enabled but does not work on this machine, so DiaReader "
         "stopped rather than generate a book that might come out silent.\n\n"
-        f"{compiler_line}\n"
+        f"{compiler_line}{headers_line}\n"
         f"What failed:\n    {detail}\n\n"
-        "torch.compile builds a small C launcher for every GPU kernel it generates, "
-        "which needs a C compiler present at run time. DiaReader ships one (TinyCC) "
-        "and normally uses it without any setup, so if you are seeing this, install "
-        "Microsoft's C++ build tools:\n\n"
-        "    winget install Microsoft.VisualStudio.2022.BuildTools "
-        "--override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools "
-        "--includeRecommended\"\n\n"
-        "Then restart DiaReader so it picks up the new PATH.\n\n"
-        "Alternatively, turn off 'use_torch_compile' in Settings. Generation then "
-        "runs about 1.56x slower, but needs no compiler at all."
+        "torch.compile builds a small C launcher for every GPU kernel it generates. "
+        "DiaReader ships everything that needs — a C compiler and CPython's headers "
+        "— so this should not happen and nothing needs installing.\n\n"
+        "The quickest way forward is to turn off 'use_torch_compile' in Settings. "
+        "Generation then runs about 1.56x slower and needs no compiler at all.\n\n"
+        "To use a different compiler instead, set the CC environment variable to it "
+        "(for example MSVC's cl.exe) and restart DiaReader — CC takes priority over "
+        "the bundled one. Installing build tools without setting CC will not change "
+        "anything."
     )
 
 

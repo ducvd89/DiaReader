@@ -94,13 +94,58 @@ def build_voice_bundle():
     return [(str(out), ".")]
 
 
+def collect_python_build_inputs():
+    """Ship CPython's headers and import library so kernels can compile anywhere.
+
+    torch.compile builds a small CPython extension per GPU kernel, at run time, on
+    the user's machine: it includes Python.h and links pythonNNN.lib. Triton finds
+    both through sysconfig and sys.base_exec_prefix, which in a frozen app still
+    name the Python installation on *this* machine. PyInstaller ships neither,
+    because nothing in an ordinary frozen app compiles C.
+
+    So the app worked here and failed on the next machine with "include file
+    'Python.h' not found" — measured, not guessed. About 1.5 MB of headers buys the
+    1.56x that torch.compile is worth.
+    """
+    import sysconfig
+
+    include = Path(sysconfig.get_paths()["include"])
+    if not (include / "Python.h").is_file():
+        include = Path(sys.base_prefix) / "Include"
+
+    collected = []
+    if (include / "Python.h").is_file():
+        for header in include.rglob("*.h"):
+            target = Path("pybuild/Include") / header.parent.relative_to(include)
+            collected.append((str(header), str(target)))
+    else:
+        print(f"WARNING: no Python.h under {include}; the build will not be able to "
+              f"compile kernels on a machine without Python", file=sys.stderr)
+
+    libs_found = 0
+    for base in (sys.base_exec_prefix, sys.exec_prefix):
+        for lib in (Path(base) / "libs").glob("python*.lib"):
+            collected.append((str(lib), "pybuild/libs"))
+            libs_found += 1
+        if libs_found:
+            break
+    if not libs_found:
+        print("WARNING: no python*.lib found; kernels will not link on a machine "
+              "without Python", file=sys.stderr)
+
+    print(f"NOTE: bundling {len(collected) - libs_found} CPython headers and "
+          f"{libs_found} import librar{'y' if libs_found == 1 else 'ies'}")
+    return collected
+
+
 voice_bundle = build_voice_bundle()
+python_build_inputs = collect_python_build_inputs()
 
 a = Analysis(
     [str(PROJECT / "main.py")],
     pathex=[str(PROJECT)],
     binaries=binaries,
-    datas=datas + voice_bundle + [
+    datas=datas + voice_bundle + python_build_inputs + [
         (str(PROJECT / "README.md"), "."),
         # Needed at run time too, not just for the .exe's own icon: Qt draws the
         # title-bar and taskbar icon from this file.

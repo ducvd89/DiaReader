@@ -112,26 +112,47 @@ def run() -> tuple[bool, str]:
     # app is running on. A build machine has Visual Studio and never notices; the
     # machine the installer was carried to raised "Failed to find C compiler" once
     # per sentence and wrote an export of pure silence.
+    headers = compile_support.use_bundled_python_headers()
     found_cc, cc = compile_support.c_compiler()
+
+    app_dir = Path(sys.executable).resolve().parent
+
+    def _inside_app(path: str) -> bool:
+        try:
+            return Path(path).resolve().is_relative_to(app_dir)
+        except (OSError, ValueError):
+            return False
+
+    # Every input to a run-time compile, checked for the one property that decides
+    # whether this build works anywhere but here: does it live inside the installed
+    # folder? Three separate bugs have now been "resolved from the build machine" —
+    # the compiler, then CPython's headers, then its import library — and each was
+    # invisible on the machine that built the app and fatal on the next one.
+    inputs: list[tuple[str, str]] = [("C compiler", cc if found_cc else "")]
+    pybuild = compile_support.bundled_python_build_dirs()
+    if pybuild is not None:
+        inputs += [("Python headers", str(pybuild[0])), ("Python import lib", str(pybuild[1]))]
+
     rows.append(_line(found_cc or None, "C compiler",
                       cc if found_cc else f"{cc} — torch.compile cannot run"))
     if bundled_cc:
         rows.append(_line(True, "  bundled compiler", f"using {bundled_cc}"))
-    if frozen and found_cc:
-        # The bug this catches, exactly: triton resolved its compiler through a path
-        # naming the *build* machine's site-packages. That path exists here and the
-        # app works; it does not exist anywhere else, and the app fails there only.
-        # A compiler outside the installed folder is therefore not a working
-        # compiler, it is a working *build machine*.
-        app_dir = Path(sys.executable).resolve().parent
-        try:
-            inside = Path(cc).resolve().is_relative_to(app_dir)
-        except (OSError, ValueError):
-            inside = False
-        if not inside:
-            essential_ok = False
-            rows.append(_line(False, "", f"that compiler is outside {app_dir} — it will "
-                                         f"not exist on any other machine"))
+    if headers:
+        rows.append(_line(True, "  bundled headers", headers))
+    elif frozen:
+        essential_ok = False
+        rows.append(_line(False, "Python headers",
+                          "not in this build — compiling needs Python.h and "
+                          "pythonNNN.lib, which only exist here because Python is "
+                          "installed on this machine"))
+
+    if frozen:
+        for label, path in inputs:
+            if path and not _inside_app(path):
+                essential_ok = False
+                rows.append(_line(False, "", f"{label} resolves outside {app_dir} "
+                                             f"({path}) — it will not exist on any "
+                                             f"other machine"))
 
     result: dict = {}
 
