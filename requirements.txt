@@ -1,0 +1,31 @@
+# PyTorch is NOT listed here on purpose — install it separately per README.md
+# with the correct CUDA/nightly index URL for your GPU.
+
+# The GitHub repo's package name is "nari-tts" even though the importable module is "dia".
+#
+# PINNED, deliberately, to the last commit before nari-labs' 2025-06-27 refactor
+# ("New weights & transformers support", 65028e0c). That refactor changed how the
+# model computes while KEEPING every parameter name identical, so cosrigel's weights
+# load "cleanly" (343/343 keys match) onto the new code and then quietly degenerate:
+# a 68-char sentence ran 1331 decode steps / 15.5s instead of ~300 / 3.3s, looping
+# fragments instead of stopping at EOS. On this pinned commit the same input gives
+# 301 steps / 3.3s. The model card confirms base_model: nari-labs/Dia-1.6B (the
+# pre-refactor repo). Do not bump this without re-testing generation length.
+nari-tts @ git+https://github.com/nari-labs/dia.git@4a9e29b1bd
+huggingface_hub>=0.24
+safetensors>=0.4
+ebooklib>=0.18
+beautifulsoup4>=4.12
+soundfile>=0.12
+# torchcodec is required by dia's audio_prompt loading (torchaudio.load). Install it from
+# the SAME PyTorch nightly index and build date as torch (see README section 2), not from
+# PyPI: it loads C++ shared libraries linked against torch, so a mismatched pair fails at
+# import. It also needs FFmpeg's shared DLLs on the system — `winget install
+# Gyan.FFmpeg.Shared`; imageio-ffmpeg's bundled exe does not satisfy it.
+torchcodec
+imageio-ffmpeg>=0.5
+PySide6>=6.7
+python-dotenv>=1.0
+numpy
+
+pytest>=8.0

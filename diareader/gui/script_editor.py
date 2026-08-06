@@ -1,0 +1,635 @@
+"""Script editor: drag coloured voice chips into a chapter to cast it.
+
+The pipeline already understands inline markers like [GiongNu2]; this makes placing them
+a visual job instead of hand-typing names that have to match the library exactly. Each
+voice keeps one stable colour so a long script can be scanned for who speaks where.
+"""
+from __future__ import annotations
+
+import logging
+import re
+
+from PySide6.QtCore import QMimeData, Qt, Signal
+from PySide6.QtGui import (
+    QColor, QDrag, QFont, QPalette, QSyntaxHighlighter, QTextCharFormat, QTextCursor
+)
+from PySide6.QtWidgets import (
+    QComboBox, QDialog, QDialogButtonBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+)
+
+from .. import chunking, config, voice
+
+log = logging.getLogger(__name__)
+
+# Hues and their order are both load-bearing, and both were computed rather than
+# picked by eye (OKLab ΔE×100 under Machado-Oliveira-Fernandes colour-blindness
+# simulation). Two markers can sit anywhere relative to each other in a script, so
+# EVERY pair has to be separable, not just neighbours — the first five slots clear
+# that all-pairs bar with room to spare (worst pair: CVD ΔE 13.0, normal-vision
+# 16.3, against gates of 8 and 15). Slots 6-8 exist so a large library still gets
+# distinct colours; they only clear the weaker adjacent bar, which is fine because
+# a marker always spells its voice name out — colour is a scanning aid here, never
+# the sole carrier of identity.
+#
+# What this replaced: colours used to come from `md5(name) % len(palette)`, which
+# collided — "Latradio" and "NuMN1" both landed on #f6bd60, i.e. two different
+# voices rendered identically. Positional assignment cannot collide at all, and
+# because voices are numbered in library order (append-only), adding a voice hands
+# it the next free slot instead of recolouring the ones already in use.
+#
+# The first FOUR are additionally the best set for the dark theme this app usually
+# renders in: requiring each swatch to clear 3:1 against a dark editor background
+# leaves exactly blue/yellow/magenta/green as the largest set that still clears the
+# all-pairs bar. No five-hue set satisfies both, so slot 5 onward trades one for the
+# other — violet sits there deliberately, because it separates cleanly from the
+# first four and merely looks dim, whereas the brighter alternatives (red beside
+# magenta) are the confusable kind of wrong this palette exists to prevent. Its
+# white ink reads at 8.56:1, the highest of any swatch, so the marker text stays
+# legible even where the block itself is quiet.
+#
+# Red sits LAST, not sixth, and that is a correctness fix rather than taste. The
+# marker for a voice that no longer exists is painted #d03b3b, and series red
+# #e34948 measures ΔE 4.8 from it — two near-identical reds meaning "a real voice"
+# and "this voice is gone". A sixth voice hit that in practice. Aqua takes slot 6
+# instead: ΔE 31.9 from the error colour, and it is the only candidate that also
+# clears the normal-vision floor there (15.6 against red's 13.2 and orange's 12.9).
+_PALETTE = [
+    "#2a78d6",  # blue
+    "#eda100",  # yellow
+    "#e87ba4",  # magenta
+    "#008300",  # green
+    "#4a3aa7",  # violet
+    "#1baf7a",  # aqua
+    "#eb6834",  # orange
+    "#e34948",  # red — last, see above
+]
+
+# Chosen per hue by measured WCAG contrast against the swatch itself rather than a
+# single global ink: #4a3aa7 with dark text is 2.45:1 (unreadable), with white 8.56:1.
+# Black here is pure #000000 rather than a softened near-black — on the blue swatch
+# #111111 measures 4.28:1 and #000000 measures 4.76:1, which is the difference
+# between failing and clearing the 4.5:1 bar. Worst pairing below is 4.76:1.
+_PALETTE_INK = [
+    "#000000", "#000000", "#000000", "#ffffff",
+    "#ffffff", "#000000", "#000000", "#000000",
+]
+
+# Deliberately outside the palette above: a marker naming a voice that no longer
+# exists is an error state, not a ninth voice.
+#
+# Its red is also NOT what identifies it. The first six slots stay ΔE >= 15 from it,
+# but slots 7 (orange, 10.8) and 8 (red, 4.8) cannot: eight categorical hues cover
+# most of the wheel, so no error colour can sit 15 away from all of them. Rather than
+# pretend otherwise, the error marker additionally wears a wave underline — the
+# distinction lives in a channel the palette does not compete for, and survives being
+# read by someone who cannot separate the two reds at all.
+_UNKNOWN_COLOUR = "#d03b3b"
+_UNKNOWN_INK = "#ffffff"
+
+
+def voice_slot(name: str, library: "list[str] | tuple[str, ...]") -> int | None:
+    """Palette slot for a voice: its position in the library, wrapping if the
+    library outgrows the palette. None for a name the library doesn't contain."""
+    try:
+        return library.index(name) % len(_PALETTE)
+    except ValueError:
+        return None
+
+
+def voice_colour(name: str, library: "list[str] | tuple[str, ...]" = ()) -> QColor:
+    slot = voice_slot(name, library)
+    return QColor(_UNKNOWN_COLOUR if slot is None else _PALETTE[slot])
+
+
+def voice_ink(name: str, library: "list[str] | tuple[str, ...]" = ()) -> QColor:
+    """Text colour to lay over `voice_colour(name)`."""
+    slot = voice_slot(name, library)
+    return QColor(_UNKNOWN_INK if slot is None else _PALETTE_INK[slot])
+
+
+# How much of a voice's hue to mix into the background of the text it reads. Enough
+# to group a passage at a glance, little enough that the prose stays the thing being
+# read rather than the colour.
+SPAN_TINT_STRENGTH = 0.22
+
+
+def voice_span_tint(name: str, library, base: QColor) -> QColor:
+    """Background wash marking a passage as belonging to one voice.
+
+    Mixed into the editor's own background rather than applied as the hue itself:
+    the palette is built to be read as a *fill with ink on top*, and several entries
+    are far too dark to serve as text colour — violet measures 1.95:1 against a dark
+    editor, which is unreadable. Tinting the background instead keeps the exact hue
+    identity of the chip while the prose keeps the contrast it had.
+
+    Blended to an opaque colour rather than left as an alpha brush so the result does
+    not depend on how the widget happens to composite translucent backgrounds.
+    """
+    hue = voice_colour(name, library)
+    k = SPAN_TINT_STRENGTH
+    return QColor(
+        round(base.red() * (1 - k) + hue.red() * k),
+        round(base.green() * (1 - k) + hue.green() * k),
+        round(base.blue() * (1 - k) + hue.blue() * k),
+    )
+
+
+# Dia's documented non-verbal tags. The model reads these as performance directions
+# rather than speaking them. Only these exact spellings are recognised — upstream
+# warns that unlisted ones "may cause weird artifacts", which is why this is a fixed
+# list of buttons instead of a free-text field.
+#
+# Defined in chunking, not here: the pipeline has to subtract them when estimating how
+# long a chunk should take, so the list belongs with the text handling rather than in
+# the GUI. A second copy here would drift, and the drift would be invisible until the
+# coverage check started firing on whichever tag the two lists disagreed about.
+NONVERBAL_TAGS = chunking.NONVERBAL_TAGS
+_NONVERBAL_RE = chunking.NONVERBAL_RE
+
+# Flat white so a performance direction never reads as a speaker. Voice markers own
+# the colours; these stay deliberately colourless.
+_NONVERBAL_BG = "#ffffff"
+_NONVERBAL_INK = "#000000"
+
+
+class MarkerHighlighter(QSyntaxHighlighter):
+    """Paints [Voice] markers in that voice's colour, flags unknown ones, and marks
+    non-verbal tags.
+
+    A marker naming a voice that no longer exists silently falls back to the default at
+    generation time, so it is worth making visible while editing rather than discovering
+    it in the audio.
+    """
+
+    def __init__(self, document, known_names: list[str], start_voice: str | None = None,
+                 base_colour: QColor | None = None):
+        super().__init__(document)
+        # Order matters, not just membership: it decides which palette slot each
+        # voice gets, so this keeps the list rather than a set.
+        self.known = list(known_names)
+        self.start_voice = start_voice
+        self.base_colour = base_colour or QColor("#1e1e1e")
+
+    def set_known(self, names: list[str]) -> None:
+        self.known = list(names)
+        self.rehighlight()
+
+    def set_start_voice(self, name: str | None) -> None:
+        """The starting voice's passages are left untinted, so which voice that is
+        changes what gets painted."""
+        if name == self.start_voice:
+            return
+        self.start_voice = name
+        self.rehighlight()
+
+    def _tint_state(self, name: str | None) -> int:
+        """Block state encoding the voice in force at the end of a block.
+
+        -1 means "no tint": either nothing has overridden the starting voice yet, or
+        a marker named the starting voice and handed narration back to it. Qt's own
+        default for an unset block state is also -1, which makes the first block fall
+        out correctly without a special case.
+        """
+        if name is None or name == self.start_voice or name not in self.known:
+            return -1
+        return self.known.index(name)
+
+    def _voice_for_state(self, state: int) -> str | None:
+        if state < 0 or state >= len(self.known):
+            return None
+        return self.known[state]
+
+    def highlightBlock(self, text: str) -> None:
+        # Voice carries across paragraphs — a marker in the first line governs
+        # everything until the next one, however many blocks later that is.
+        state = self.previousBlockState()
+        if state < -1:
+            state = -1
+
+        def tint(start: int, end: int, current: int) -> None:
+            name = self._voice_for_state(current)
+            if name is None or end <= start:
+                return
+            fmt = QTextCharFormat()
+            fmt.setBackground(voice_span_tint(name, self.known, self.base_colour))
+            self.setFormat(start, end - start, fmt)
+
+        position = 0
+        for match in chunking.VOICE_MARKER.finditer(text):
+            tint(position, match.start(), state)
+            name = match.group(1)
+            fmt = QTextCharFormat()
+            fmt.setBackground(voice_colour(name, self.known))
+            fmt.setForeground(voice_ink(name, self.known))
+            if name not in self.known:
+                fmt.setToolTip(f"No voice named {name}")
+                # Not colour alone: see the note on _UNKNOWN_COLOUR.
+                fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+                fmt.setUnderlineColor(QColor("#ffffff"))
+            fmt.setFontWeight(QFont.Weight.Bold)
+            self.setFormat(match.start(), match.end() - match.start(), fmt)
+            state = self._tint_state(name)
+            position = match.end()
+        tint(position, len(text), state)
+        self.setCurrentBlockState(state)
+
+        for match in _NONVERBAL_RE.finditer(text):
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor(_NONVERBAL_BG))
+            fmt.setForeground(QColor(_NONVERBAL_INK))
+            fmt.setFontItalic(True)
+            fmt.setToolTip("Non-verbal direction — performed, not spoken.")
+            self.setFormat(match.start(), match.end() - match.start(), fmt)
+
+
+class VoiceChip(QLabel):
+    """A draggable swatch. Dragging carries the marker text, so the editor's ordinary
+    text-drop handling inserts it wherever it lands — no custom drop logic needed."""
+
+    def __init__(self, name: str, library=(), parent=None):
+        super().__init__(name, parent)
+        self.name = name
+        colour = voice_colour(name, library)
+        ink = voice_ink(name, library)
+        self.setStyleSheet(
+            f"background: {colour.name()}; color: {ink.name()}; font-weight: 600;"
+            "padding: 4px 10px; border-radius: 9px;"
+        )
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip(f"Drag into the script, or double-click to insert at the cursor.\n"
+                        f"Everything after it is read by {name}, until the next marker.")
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        mime = QMimeData()
+        mime.setText(f"[{self.name}] ")
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(self.grab())
+        drag.exec(Qt.DropAction.CopyAction)
+
+
+MIN_FONT_PT = 7
+MAX_FONT_PT = 36
+DEFAULT_FONT_PT = 11
+
+
+class ScriptEditor(QPlainTextEdit):
+    font_size_changed = Signal(int)
+
+    def __init__(self, parent=None, font_pt: int = DEFAULT_FONT_PT):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.set_font_size(font_pt)
+
+    def set_font_size(self, points: int) -> None:
+        points = max(MIN_FONT_PT, min(MAX_FONT_PT, int(points)))
+        if points == self.font().pointSize():
+            return
+        font = QFont(self.font())
+        font.setPointSize(points)
+        self.setFont(font)
+        self.font_size_changed.emit(points)
+
+    def zoom_by(self, steps: int) -> None:
+        self.set_font_size(self.font().pointSize() + steps)
+
+    def wheelEvent(self, event) -> None:
+        """Ctrl+wheel zooms, matching what every other text surface does.
+
+        QPlainTextEdit's built-in zoomIn/zoomOut are deliberately not used: they
+        adjust the widget's zoom independently of its font, so the size cannot be
+        read back to persist it.
+        """
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.zoom_by(1 if event.angleDelta().y() > 0 else -1)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def insert_marker(self, name: str) -> None:
+        self.insertPlainText(f"[{name}] ")
+        self.setFocus()
+
+    def insert_tag(self, tag: str) -> None:
+        self.insertPlainText(f"{tag} ")
+        self.setFocus()
+
+
+def sentence_at(text: str, cursor_pos: int, start_voice: str | None = None):
+    """Which sentence the cursor sits in, 1-based, and the voice reading it.
+
+    The number has to be the same one the export log prints ("Sentence 75 of
+    'Chương 200'..."), because looking a reported failure back up in the script is
+    the whole reason to show it. So rather than counting sentences a second way,
+    this runs the pipeline's own chunker over the text up to the cursor.
+
+    The appended "x" is what makes boundaries come out right: it guarantees an
+    in-progress sentence exists at the cursor, so a cursor resting at the very start
+    of sentence N counts N rather than the N-1 complete sentences behind it.
+    """
+    chunks = chunking.chunk_text_with_voices(text[:cursor_pos] + "x", start_voice=start_voice)
+    if not chunks:
+        return 1, start_voice
+    return len(chunks), chunks[-1].voice
+
+
+class NonverbalButton(QPushButton):
+    """One of Dia's non-verbal directions. Flat white on purpose — these are stage
+    directions, not speakers, and must not read as another voice in the cast."""
+
+    def __init__(self, tag: str, parent=None):
+        super().__init__(tag, parent)
+        self.tag = tag
+        self.setStyleSheet(
+            f"QPushButton {{ background: {_NONVERBAL_BG}; color: {_NONVERBAL_INK};"
+            "border: 1px solid #b8b8b8; border-radius: 9px; padding: 3px 8px; }"
+            "QPushButton:hover { border-color: #6d6d6d; }"
+        )
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(f"Insert {tag} at the cursor — performed, not read aloud.")
+
+
+class ScriptEditorDialog(QDialog):
+    """Edit one chapter's text, then export that text rather than the book's."""
+
+    export_requested = Signal()
+    # Saving keeps the dialog open, so the edited text has to travel out while it is
+    # still up rather than being read off a closed dialog.
+    script_saved = Signal(str)
+
+    def __init__(self, settings: config.Settings, title: str, text: str, parent=None,
+                 on_reset=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Script — {title}")
+        self.resize(900, 640)
+        self.settings = settings
+        self.chapter_title = title
+        # Callable returning the chapter's text as the book itself has it, or None if
+        # the caller cannot produce it (then Reset is not offered rather than lying).
+        self._on_reset = on_reset
+        self._saved_text = text
+
+        # Library order, not alphabetical: it is what assigns each voice its palette
+        # slot, so the chips here show exactly the colours the markers will take.
+        names = voice.voice_names_in_library_order(settings)
+
+        self.editor = ScriptEditor(
+            font_pt=int(getattr(settings, "script_font_pt", DEFAULT_FONT_PT))
+        )
+        self.editor.setPlainText(text)
+        self.editor.font_size_changed.connect(self._remember_font_size)
+        self.highlighter = MarkerHighlighter(
+            self.editor.document(), names,
+            base_colour=self.editor.palette().color(QPalette.ColorRole.Base),
+        )
+
+        palette_row = QHBoxLayout()
+        palette_row.addWidget(QLabel("Voices:"))
+        if names:
+            for name in names:
+                chip = VoiceChip(name, library=names)
+                chip.mouseDoubleClickEvent = (
+                    lambda _e, n=name: self.editor.insert_marker(n)
+                )
+                palette_row.addWidget(chip)
+        else:
+            hint = QLabel("(no voices configured — add some under Settings → Voices)")
+            hint.setStyleSheet("color: gray;")
+            palette_row.addWidget(hint)
+        palette_row.addStretch(1)
+
+        nonverbal_box = QGroupBox("Non-verbal")
+        nonverbal_grid = QGridLayout(nonverbal_box)
+        nonverbal_grid.setSpacing(4)
+        self.nonverbal_buttons = []
+        for i, tag in enumerate(NONVERBAL_TAGS):
+            button = NonverbalButton(tag)
+            button.clicked.connect(lambda _checked=False, t=tag: self.editor.insert_tag(t))
+            nonverbal_grid.addWidget(button, i // 7, i % 7)
+            self.nonverbal_buttons.append(button)
+
+        self.start_voice_combo = QComboBox()
+        if names:
+            self.start_voice_combo.addItems(names)
+            if settings.default_voice in names:
+                self.start_voice_combo.setCurrentText(settings.default_voice)
+        else:
+            self.start_voice_combo.addItem("(model default)")
+            self.start_voice_combo.setEnabled(False)
+
+        start_row = QHBoxLayout()
+        start_row.addWidget(QLabel("Voice before the first marker:"))
+        start_row.addWidget(self.start_voice_combo)
+        start_row.addStretch(1)
+        self.dirty_placeholder = None
+        # Numbered the same way the export log numbers its failures, so a reported
+        # "Sentence 75" can be found by moving the cursor until this matches.
+        #
+        # Deliberately not greyed out: this is the live readout, the one thing in
+        # this row that answers a question you are asking right now, so it carries
+        # the row's emphasis while the static summary beside it stays plain.
+        self.position_label = QLabel()
+        self.position_label.setStyleSheet("font-weight: 600;")
+        start_row.addWidget(self.position_label)
+        self.summary = QLabel()
+        start_row.addWidget(self.summary)
+
+        hint = QLabel(
+            "Drag a chip into the text, or double-click it to insert at the cursor. A "
+            "marker applies from where it sits until the next one. Markers are never "
+            "spoken. A marker shown in dark red names a voice that no longer exists.\n"
+            "Non-verbal tags are performed rather than read out. They come from base "
+            "Dia, whose own docs call them unpredictable and say to use them sparingly "
+            "— and this Vietnamese fine-tune was not trained on them, so check a short "
+            "export before relying on one."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray;")
+
+        self._action = "cancel"
+
+        zoom_out = QPushButton("A−")
+        zoom_in = QPushButton("A+")
+        for b, step, tip in ((zoom_out, -1, "Smaller text"), (zoom_in, 1, "Larger text")):
+            b.setFixedWidth(38)
+            b.setToolTip(f"{tip} (Ctrl+mouse wheel over the text)")
+            b.clicked.connect(lambda _c=False, s=step: self.editor.zoom_by(s))
+        self.zoom_out_button, self.zoom_in_button = zoom_out, zoom_in
+
+        self.reset_button = QPushButton("Reset to original")
+        self.reset_button.setToolTip(
+            "Re-read this chapter from the book file, discarding every edit and marker "
+            "saved for it."
+        )
+        self.reset_button.clicked.connect(self._reset_to_original)
+        self.reset_button.setEnabled(on_reset is not None)
+
+        self.dirty_label = QLabel()
+        self.dirty_label.setStyleSheet("color: gray;")
+
+        self.save_button = QPushButton("Save tags")
+        self.export_button = QPushButton("Export this script…")
+        self.close_button = QPushButton("Close")
+        # Laid out by hand rather than with QDialogButtonBox: its role-based ordering
+        # put Close between Export and Save, so the two things you actually do with a
+        # finished script sat either side of the way out.
+        self.save_button.setToolTip(
+            "Save the text and voice markers as they stand and keep editing — the "
+            "window stays open. Next time you export this book, these tags are already "
+            "in place."
+        )
+        self.save_button.clicked.connect(self._save_without_closing)
+        self.export_button.clicked.connect(self._accept_as("export"))
+        self.close_button.clicked.connect(self._close_requested)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.dirty_label)
+        button_row.addWidget(zoom_out)
+        button_row.addWidget(zoom_in)
+        button_row.addWidget(self.reset_button)
+        button_row.addStretch(1)
+        button_row.addWidget(self.save_button)
+        button_row.addWidget(self.export_button)
+        button_row.addWidget(self.close_button)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(palette_row)
+        layout.addWidget(self.editor, stretch=1)
+        layout.addWidget(nonverbal_box)
+        layout.addLayout(start_row)
+        layout.addWidget(hint)
+        layout.addLayout(button_row)
+
+        self.editor.textChanged.connect(self._update_summary)
+        self.editor.textChanged.connect(self._update_position)
+        self.editor.textChanged.connect(self._update_dirty)
+        self.editor.cursorPositionChanged.connect(self._update_position)
+        self.start_voice_combo.currentTextChanged.connect(self._update_summary)
+        self.start_voice_combo.currentTextChanged.connect(self._update_position)
+        self.start_voice_combo.currentTextChanged.connect(
+            lambda: self.highlighter.set_start_voice(self.start_voice())
+        )
+        self.highlighter.set_start_voice(self.start_voice())
+        self._update_summary()
+        self._update_position()
+        self._update_dirty()
+
+    # --- saving, resetting, zoom -----------------------------------------------
+
+    def _remember_font_size(self, points: int) -> None:
+        """Persist the zoom, so it does not reset every time the editor is opened."""
+        if getattr(self.settings, "script_font_pt", None) == points:
+            return
+        self.settings.script_font_pt = points
+        try:
+            self.settings.save()
+        except OSError:  # a read-only settings file must not break editing
+            log.warning("Could not persist the script editor font size.", exc_info=True)
+
+    def _update_dirty(self) -> None:
+        dirty = self.editor.toPlainText() != self._saved_text
+        self.dirty_label.setText("Unsaved changes" if dirty else "Saved")
+        self.save_button.setEnabled(dirty)
+
+    def _save_without_closing(self) -> None:
+        """Save and stay open — tagging a chapter is iterative, and a save that also
+        closed the window meant reopening it to place the next marker."""
+        text = self.editor.toPlainText()
+        self._saved_text = text
+        self._action = "save"
+        self.script_saved.emit(text)
+        self._update_dirty()
+
+    def _reset_to_original(self) -> None:
+        if self._on_reset is None:
+            return
+        answer = QMessageBox.question(
+            self, "Reset to original",
+            f"Re-read “{self.chapter_title}” from the book file?\n\n"
+            "Every edit and voice marker saved for this chapter is discarded. "
+            "This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            original = self._on_reset()
+        except Exception as e:  # noqa: BLE001 — surface it instead of silently doing nothing
+            QMessageBox.critical(self, "Could not reset", str(e))
+            return
+        if original is None:
+            QMessageBox.information(
+                self, "Nothing to reset to",
+                "The original text for this chapter could not be read from the book.",
+            )
+            return
+        self.editor.setPlainText(original)
+        # A reset is itself a change to be saved; leaving it "Saved" would imply the
+        # stored copy had been reverted too, which it has not.
+        self._update_dirty()
+
+    def _close_requested(self) -> None:
+        if self.editor.toPlainText() == self._saved_text:
+            self.reject()
+            return
+        answer = QMessageBox.question(
+            self, "Unsaved changes",
+            "This script has changes that have not been saved. Close anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.reject()
+
+    def _update_summary(self) -> None:
+        text = self.editor.toPlainText()
+        sentences = chunking.chunk_text_with_voices(text, start_voice=self.start_voice())
+        used = {c.voice for c in sentences if c.voice}
+        minutes = len(sentences) * 40 / 60
+        self._total_sentences = len(sentences)
+        self.summary.setText(
+            f"{len(sentences)} sentences, {len(used) or 1} voice(s) — "
+            f"roughly {minutes:.0f} min to generate"
+        )
+
+    def _update_position(self) -> None:
+        text = self.editor.toPlainText()
+        number, voice_name = sentence_at(
+            text, self.editor.textCursor().position(), start_voice=self.start_voice()
+        )
+        total = getattr(self, "_total_sentences", None)
+        if total is None:
+            total = len(chunking.chunk_text_with_voices(text, start_voice=self.start_voice()))
+        # An empty editor has no sentence 1 to be in.
+        if total == 0:
+            self.position_label.setText("")
+            return
+        where = f"Sentence {min(number, total)} of {total}"
+        self.position_label.setText(f"{where} · {voice_name}  " if voice_name else f"{where}  ")
+
+    def sentence_position(self) -> tuple[int, str | None]:
+        """Cursor's sentence number and active voice — exposed for tests."""
+        return sentence_at(
+            self.editor.toPlainText(), self.editor.textCursor().position(),
+            start_voice=self.start_voice(),
+        )
+
+    def _accept_as(self, action: str):
+        def handler():
+            self._action = action
+            self.accept()
+        return handler
+
+    def action(self) -> str:
+        """Which button closed the dialog: 'save', 'export', or 'cancel'."""
+        return self._action
+
+    def start_voice(self) -> str | None:
+        return self.start_voice_combo.currentText() if self.start_voice_combo.isEnabled() else None
+
+    def script_text(self) -> str:
+        return self.editor.toPlainText()

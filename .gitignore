@@ -1,0 +1,22 @@
+# Secrets. .env holds HF_TOKEN in plain text.
+.env
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Per-machine tool config, not project config.
+.claude/settings.local.json
+
+# Voices and generated audio. Reference clips live in %APPDATA%\DiaReader\voice_refs
+# and are deliberately not part of the source tree; *.vbkp is a voice-library backup,
+# which is a zip full of them.
+*.wav
+*.mp3
+*.vbkp
+
+/build/
+/dist/
+*.egg-info/
