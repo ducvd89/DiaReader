@@ -84,6 +84,20 @@ def run() -> tuple[bool, str]:
         return essential_ok, "\n".join(rows)
 
     # --- reading voice reference audio ---
+    # Reported separately from torchcodec itself: the import below only succeeds
+    # because the package __init__ already registered this directory, so a failure
+    # with a directory shown here means a broken FFmpeg build, while a failure with
+    # no directory means none was found at all. Different fixes, same symptom.
+    from diareader import ffmpeg_dlls
+
+    ffmpeg_dir = ffmpeg_dlls.registered_dir()
+    if ffmpeg_dir is not None:
+        rows.append(_line(True, "FFmpeg libraries", str(ffmpeg_dir)))
+    else:
+        rows.append(_line(None, "FFmpeg libraries",
+                          "no shared build found — 'winget install Gyan.FFmpeg.Shared', "
+                          f"or set {ffmpeg_dlls.ENV_OVERRIDE}"))
+
     try:
         import torchaudio  # noqa: F401
         import torchcodec  # noqa: F401

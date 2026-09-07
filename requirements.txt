@@ -12,8 +12,25 @@
 # 301 steps / 3.3s. The model card confirms base_model: nari-labs/Dia-1.6B (the
 # pre-refactor repo). Do not bump this without re-testing generation length.
 nari-tts @ git+https://github.com/nari-labs/dia.git@4a9e29b1bd
-huggingface_hub>=0.24
+
+# 1.5 or newer, and the floor is load-bearing on Windows. Under 1.0 the hub lays the
+# cache out with symlinks, and symlinks created under %APPDATA%\DiaReader cannot be
+# opened by anything on this machine — the download reports success and the model load
+# dies several steps later with "Could not parse the architecture config". 1.x does not
+# use them. diareader/hf_cache.py repairs it if it ever comes back.
+huggingface_hub>=1.5
 safetensors>=0.4
+
+# The quality checker transcribes each generated sentence and counts the syllables it
+# recognised (diareader/asr_verify.py). transformers 5 is deliberate rather than
+# incidental: the only reason this project was ever pinned to 4.57 was a second TTS
+# engine that has since been removed, and that pin dragged huggingface_hub below 1.0
+# with the cache bug above. The recogniser is a 95M-parameter wav2vec2 CTC model, runs
+# on the CPU in ~0.2s a sentence and never touches the GPU — Whisper was tried here
+# once and removed because loading it beside Dia took the process down with a CUDA OOM.
+transformers>=5.0
+# Resampling, both for the checker's 16 kHz input and inside descript-audio-codec.
+librosa>=0.10
 ebooklib>=0.18
 beautifulsoup4>=4.12
 soundfile>=0.12
@@ -29,3 +46,8 @@ python-dotenv>=1.0
 numpy
 
 pytest>=8.0
+# Packaging only, and only on the machine that builds the installer
+# (packaging/build.ps1). Listed here rather than in a second requirements file because
+# pytest already is, and one file that occasionally installs a megabyte nobody runs
+# beats two files that drift apart.
+pyinstaller>=6.10

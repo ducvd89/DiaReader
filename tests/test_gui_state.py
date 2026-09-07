@@ -139,7 +139,7 @@ def test_a_retired_setting_does_not_stop_the_app_from_starting(tmp_path, monkeyp
         "speed": 0.9,                     # still real, must survive
     })
     assert settings.speed == 0.9
-    assert settings.verify_mode == "syllables"
+    assert settings.verify_mode == config.Settings().verify_mode
     assert not hasattr(settings, "verify_with_asr")
 
 
@@ -221,3 +221,36 @@ def test_controls_expose_no_playback_buttons(qt_app):
         assert not hasattr(controls, gone), f"{gone} survived the playback removal"
     assert hasattr(controls, "export_button")
     assert hasattr(controls, "stop_button"), "Stop still cancels an export"
+
+
+# --- the review table is scoped to one chapter ---------------------------------------
+
+
+def test_the_current_chapter_falls_back_to_the_focused_row():
+    """Clicking a chapter to read it is how a user says which one they mean; making
+    them select it a second time is a step for nothing."""
+    from diareader.gui.main_window import MainWindow
+
+    class _List:
+        def __init__(self, selected, current):
+            self._selected, self._current = selected, current
+
+        def selected_indices(self):
+            return self._selected
+
+        def currentRow(self):
+            return self._current
+
+    class _Window:
+        def __init__(self, selected, current, chapters=3):
+            self.chapter_list = _List(selected, current)
+            self.chapters = [object()] * chapters
+
+    def current(selected, row, chapters=3):
+        return MainWindow._current_chapter(_Window(selected, row, chapters))
+
+    assert current([2], 0) == 2, "an explicit selection wins"
+    assert current([], 1) == 1, "otherwise the focused row"
+    assert current([], -1) is None, "nothing at all"
+    assert current([], 5, chapters=3) is None, "a row past the end is not a chapter"
+    assert current([1, 2], 0) == 1, "one chapter, the first of them"

@@ -61,20 +61,164 @@ MIN_SPEED = 0.5
 MAX_SPEED = 2.0
 
 
+# What counts as a pause, and how far one may be pushed.
+#
+# The threshold is a fraction of the chunk's own peak rather than an absolute level,
+# so it follows a quiet voice down instead of declaring the whole sentence silent.
+# Measured on real output at 5%: a generated sentence runs 16.6% pause by duration,
+# which is ample for the 11% the default 0.9x asks for.
+PAUSE_THRESHOLD_FRACTION = 0.05
+# 40ms catches the gaps *between sounds* — the spacing that makes speech sound
+# unhurried — not just the commas. Below that the "gaps" are inside phonemes.
+PAUSE_MIN_S = 0.04
+# A pause may grow to this multiple of itself, and shrink to that one. Uncapped, 0.5x
+# would need every pause seven times longer, which reads as a fault rather than as
+# slow speech.
+PAUSE_MAX_GROWTH = 2.5
+PAUSE_MIN_SHRINK = 0.4
+# Envelope smoothing. Long enough to ignore the zero crossings inside a vowel, short
+# enough to still see a gap between two words.
+PAUSE_ENVELOPE_S = 0.02
+
+
+def find_pauses(
+    audio: np.ndarray,
+    sample_rate: int = config.SAMPLE_RATE,
+    threshold_fraction: float = PAUSE_THRESHOLD_FRACTION,
+    min_pause_s: float = PAUSE_MIN_S,
+) -> list[tuple[int, int]]:
+    """(start, end) sample ranges that are quiet for at least `min_pause_s`."""
+    if audio.size == 0:
+        return []
+
+    envelope = np.abs(audio)
+    window = max(1, int(PAUSE_ENVELOPE_S * sample_rate))
+    envelope = np.convolve(envelope, np.ones(window, dtype=np.float32) / window, mode="same")
+
+    peak = float(envelope.max())
+    if peak <= 0.0:
+        return []
+
+    quiet = envelope < peak * threshold_fraction
+    # Pad both ends so a pause running to the edge of the chunk is still bounded.
+    edges = np.diff(np.concatenate(([0], quiet.view(np.int8), [0])))
+    starts = np.flatnonzero(edges == 1)
+    ends = np.flatnonzero(edges == -1)
+
+    minimum = int(min_pause_s * sample_rate)
+    return [(int(s), int(e)) for s, e in zip(starts, ends) if e - s >= minimum]
+
+
+def _resize(segment: np.ndarray, length: int) -> np.ndarray:
+    """Stretch or squeeze one near-silent segment to `length` samples.
+
+    Interpolated rather than padded with zeros: a pause carries the recording's own
+    noise floor, and splicing digital silence into it puts an audible edge at each
+    join. Interpolating shifts that noise's spectrum slightly, which at 5% of peak is
+    not something anyone can hear.
+    """
+    if length <= 0:
+        return np.zeros(0, dtype=np.float32)
+    if segment.size == length:
+        return segment
+    if segment.size < 2:
+        return np.full(length, segment[0] if segment.size else 0.0, dtype=np.float32)
+    source = np.linspace(0.0, 1.0, segment.size, dtype=np.float64)
+    target = np.linspace(0.0, 1.0, length, dtype=np.float64)
+    return np.interp(target, source, segment).astype(np.float32)
+
+
+def stretch_pauses(
+    audio: np.ndarray, factor: float, sample_rate: int = config.SAMPLE_RATE
+) -> np.ndarray:
+    """Change total duration by `factor`, taking it out of the pauses only.
+
+    factor > 1 lengthens. Speech samples are copied through untouched, so syllables
+    keep the rate and shape the model produced and only the spacing between them
+    moves — which is what "read this more slowly" means to a listener, as opposed to
+    drawing every vowel out.
+
+    Returns the best it can manage: pauses have a finite budget, and a chunk with none
+    at all comes back unchanged. change_speed makes up any shortfall.
+    """
+    if audio.size == 0 or abs(factor - 1.0) < 0.001:
+        return audio
+
+    pauses = find_pauses(audio, sample_rate)
+    if not pauses:
+        return audio
+
+    wanted = int(round(audio.size * factor)) - audio.size
+    lengths = np.array([end - start for start, end in pauses], dtype=np.float64)
+    capacity = lengths * (
+        (PAUSE_MAX_GROWTH - 1.0) if wanted > 0 else (1.0 - PAUSE_MIN_SHRINK)
+    )
+    total_capacity = float(capacity.sum())
+    if total_capacity <= 0:
+        return audio
+
+    # Proportional to length, so a comma-sized gap and a full stop keep their relative
+    # weight instead of every pause becoming the same size.
+    share = min(1.0, abs(wanted) / total_capacity)
+    deltas = np.round(capacity * share).astype(int)
+    if wanted < 0:
+        deltas = -deltas
+
+    pieces: list[np.ndarray] = []
+    cursor = 0
+    for (start, end), delta in zip(pauses, deltas):
+        pieces.append(audio[cursor:start])
+        pieces.append(_resize(audio[start:end], (end - start) + int(delta)))
+        cursor = end
+    pieces.append(audio[cursor:])
+    return np.concatenate(pieces).astype(np.float32)
+
+
 def change_speed(
     audio: np.ndarray, speed: float, sample_rate: int = config.SAMPLE_RATE
 ) -> np.ndarray:
-    """Time-stretch without changing pitch, via ffmpeg's atempo filter.
+    """Change reading pace: spacing first, then the speech itself if that is not enough.
 
-    speed < 1 is slower, > 1 is faster. Naive resampling would be simpler but shifts
-    pitch, which would stop the narration sounding like the reference voice. atempo
-    natively covers 0.5-2.0, which is exactly the range offered.
+    speed < 1 is slower, > 1 is faster.
+
+    What this used to do, and why it changed: everything went through ffmpeg's atempo,
+    which stretches the whole waveform uniformly. At 0.9x every vowel was 11% longer as
+    well as every gap, and drawn-out syllables are not what slow reading sounds like —
+    an unhurried reader leaves more room between sounds and says each one at much the
+    same rate. So the pauses absorb the change first, and atempo now only covers what
+    they cannot: at 0.9x that is usually nothing at all, while 0.5x still needs it,
+    because no amount of silence between words makes a sentence take twice as long
+    without sounding broken.
+    """
+    if audio.size == 0 or abs(speed - 1.0) < 0.01:
+        return audio
+    speed = max(MIN_SPEED, min(MAX_SPEED, speed))
+
+    factor = 1.0 / speed
+    original_size = audio.size
+    audio = stretch_pauses(audio, factor, sample_rate)
+
+    # Whatever the pauses could not absorb, expressed again as a speed. Below 1 when
+    # the chunk is still too short, above 1 when it is still too long.
+    achieved = audio.size / original_size
+    residual = achieved / factor
+    if abs(residual - 1.0) < 0.01:
+        return audio
+    return _time_stretch(audio, residual, sample_rate)
+
+
+def _time_stretch(
+    audio: np.ndarray, speed: float, sample_rate: int = config.SAMPLE_RATE
+) -> np.ndarray:
+    """Uniform tempo change without pitch shift, via ffmpeg's atempo filter.
+
+    Naive resampling would be simpler but shifts pitch, which would stop the narration
+    sounding like the reference voice. atempo natively covers 0.5-2.0, which is exactly
+    the range offered.
 
     Cost is a few tens of milliseconds per sentence against ~40s of generation, so this
     runs per chunk and applies to live playback as well as export.
     """
-    if audio.size == 0 or abs(speed - 1.0) < 0.01:
-        return audio
     speed = max(MIN_SPEED, min(MAX_SPEED, speed))
 
     cmd = [

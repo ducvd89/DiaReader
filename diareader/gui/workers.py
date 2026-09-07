@@ -6,8 +6,10 @@ import logging
 from PySide6.QtCore import QThread, Signal
 
 from .. import config
-from ..model_loader import CudaNotAvailableError, TorchCompileUnavailableError, load_model
-from ..pipeline import ExportCancelled, export_book
+from ..model_loader import (
+    CudaNotAvailableError, TorchCompileUnavailableError, load_model
+)
+from ..pipeline import ExportCancelled
 from ..tts_engine import TtsEngine
 
 log = logging.getLogger(__name__)
@@ -33,8 +35,9 @@ class ModelLoadWorker(QThread):
 
     def run(self) -> None:
         try:
-            loaded = load_model(self.settings, on_stage=lambda m: self.stage.emit(m))
-            engine = TtsEngine(loaded)
+            engine = TtsEngine(
+                load_model(self.settings, on_stage=lambda m: self.stage.emit(m))
+            )
         except (CudaNotAvailableError, TorchCompileUnavailableError) as e:
             # Both already say what is wrong and what to do about it; wrapping them
             # in "Failed to load model:" would only bury the instructions.
@@ -47,53 +50,83 @@ class ModelLoadWorker(QThread):
         self.finished_ok.emit(engine)
 
 
-class ExportWorker(QThread):
-    progress = Signal(object)  # ChunkResult
+class RenderWorker(QThread):
+    """Generate a given list of sentences into the sentence cache.
+
+    Its unit of work is a list of sentences rather than a book, which is what lets one
+    worker serve both jobs: rendering what an export is missing, and re-rendering the
+    handful somebody ticked in the review table — possibly in a voice none of them was
+    written with. It holds the GPU, so the window runs one at a time.
+    """
+
+    progress = Signal(object)   # ChunkResult
     stage = Signal(str)
-    finished_ok = Signal(str)  # output path
+    finished_ok = Signal(int)   # sentences written
     cancelled = Signal(str)
     failed = Signal(str)
 
-    def __init__(
-        self, book_path: str, out_path: str, engine: TtsEngine, settings: config.Settings,
-        chapter_indices=None, start_voice: str | None = None, chapters=None,
-        speed: float | None = None, parent=None,
-    ):
+    def __init__(self, engine, settings: config.Settings, cache, plan,
+                 speed: float | None = None, in_use: bool = True, parent=None):
         super().__init__(parent)
-        self.book_path = book_path
-        self.out_path = out_path
-        self.chapters = chapters
-        self.speed = speed
         self.engine = engine
         self.settings = settings
-        self.chapter_indices = chapter_indices
-        self.start_voice = start_voice
+        self.cache = cache
+        self.plan = plan
+        self.speed = speed
+        self.in_use = in_use
         self._keep_going = True
-        # See ModelLoadWorker.__init__ — the same torch.compile-in-a-frozen-build
-        # stack overflow risk applies here, since generation is where compilation
-        # of the first sentence actually happens.
+        # See ModelLoadWorker.__init__.
         self.setStackSize(128 * 1024 * 1024)
 
     def cancel(self) -> None:
         self._keep_going = False
 
     def run(self) -> None:
+        from ..pipeline import render_sentences
+
         try:
-            result_path = export_book(
-                self.book_path, self.out_path, self.engine, self.settings,
+            written = render_sentences(
+                self.engine, self.settings, self.cache, self.plan,
+                speed=self.speed,
                 on_progress=lambda r: self.progress.emit(r),
                 should_continue=lambda: self._keep_going,
-                chapter_indices=self.chapter_indices,
-                start_voice=self.start_voice,
                 on_stage=lambda m: self.stage.emit(m),
-                chapters=self.chapters,
-                speed=self.speed,
+                in_use=self.in_use,
             )
         except ExportCancelled as e:
             self.cancelled.emit(str(e))
             return
-        except Exception as e:  # noqa: BLE001
-            log.exception("Export failed")
-            self.failed.emit(f"Export failed: {e}")
+        except Exception as e:  # noqa: BLE001 — surface it rather than dying silently
+            log.exception("Rendering failed")
+            self.failed.emit(f"Rendering failed: {e}")
             return
-        self.finished_ok.emit(str(result_path))
+        self.finished_ok.emit(written)
+
+
+class AssembleWorker(QThread):
+    """Write the final file from the cache. Generates nothing, so it needs no GPU."""
+
+    stage = Signal(str)
+    finished_ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, cache, plan, out_path: str, speed: float | None = None, parent=None):
+        super().__init__(parent)
+        self.cache = cache
+        self.plan = plan
+        self.out_path = out_path
+        self.speed = speed
+
+    def run(self) -> None:
+        from ..pipeline import assemble
+
+        try:
+            result = assemble(
+                self.cache, self.plan, self.out_path, speed=self.speed,
+                on_stage=lambda m: self.stage.emit(m),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("Assembling the final file failed")
+            self.failed.emit(f"Could not write {self.out_path}: {e}")
+            return
+        self.finished_ok.emit(str(result))

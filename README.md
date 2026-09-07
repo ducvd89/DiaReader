@@ -69,12 +69,19 @@ which needs FFmpeg's **shared libraries** — the DLLs. The bundled `imageio-ffm
 winget install Gyan.FFmpeg.Shared
 ```
 
-Then **restart the app** so it inherits the updated PATH. Without the DLLs, every sentence raises
-inside `dia`, is turned into empty audio, retried and skipped — a multi-hour export finishes
-"successfully" as a file of pure silence, with the only clue in per-sentence warnings. That is
-exactly how one 54-sentence export was lost, so `pipeline.iter_book_audio` now probes the reference
-audio once before any GPU work and fails with the command above. Configure no voices at all and this
-is moot: the checkpoint was fine-tuned without audio prompts.
+Then **restart the app**. Note that putting the DLLs on PATH is *not* by itself enough: since Python
+3.8, Windows resolves an extension module's DLL dependencies through `os.add_dll_directory` only and
+ignores PATH, so `torchcodec` would still fail with "or one of its dependencies" on a machine that
+has the right FFmpeg installed. `diareader/ffmpeg_dlls.py` registers the directory at import time —
+it looks on PATH and in winget's package directory, and `DIAREADER_FFMPEG_BIN` overrides both if your
+build lives somewhere else. `DiaReader.exe --selftest` prints which directory it found.
+
+Without the DLLs, every sentence raises inside `dia`, is turned into empty audio, retried and
+skipped — a multi-hour export finishes "successfully" as a file of pure silence, with the only clue
+in per-sentence warnings. That is exactly how one 54-sentence export was lost, so
+`pipeline.iter_book_audio` now probes the reference audio once before any GPU work and fails with the
+command above. Configure no voices at all and this is moot: the checkpoint was fine-tuned without
+audio prompts.
 
 ## 4. Run it
 
@@ -97,6 +104,33 @@ python -m diareader.cli export mybook.epub out.mp3 --chapters 2-5 --voice GiongN
 ```bash
 python -m diareader.cli voices
 ```
+
+## Making an audiobook, in two stages
+
+Generating the audio and writing the file are separate steps, and the split is the
+point rather than an implementation detail. Every sentence is generated on its own and
+cached as its own WAV, so one bad sentence out of four hundred can be redone by itself
+instead of dragging the other 399 through the model again — a chapter costs roughly
+forty seconds a sentence, and before the split an interrupted export lost all of it.
+
+1. **Cast and render.** Select a chapter, open **Edit script**, drag voice chips into
+   the text to say who reads what, and press **Render this script**. The sentences are
+   generated into the cache. No file is written and none is asked for.
+
+2. **Check.** **Sentences…** opens a table of that chapter: what each sentence says,
+   which voice read it, what the quality checker heard, and a ▶ to listen. Failed rows
+   are red. Tick the bad ones, pick a different voice if that helps, and render again —
+   each attempt is kept, so you can compare takes and adopt whichever one is right.
+
+3. **Save.** **Save final file…** asks only where to put it and which of the rendered
+   chapters to include. It does not ask for a voice or a speed: the voice is what the
+   script's markers say, and the speed is already baked into each cached take, so
+   offering either here could only contradict what was rendered.
+
+The cache lives under `%APPDATA%\DiaReader\sentence_cache` and has a size limit you
+set from **Cache…** in the Sentences window (1/2/5 GB, or none). When it is exceeded,
+other books' takes go first, oldest first, then the takes here you never adopted.
+A take the book is actually made of is never deleted to make room.
 
 ## Voices
 

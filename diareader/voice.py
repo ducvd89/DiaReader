@@ -69,20 +69,40 @@ def load_voices(settings: "config.Settings") -> dict[str, VoiceReference]:
     return voices
 
 
+def resolve_name(
+    settings: "config.Settings", name: str | None, available: dict | None = None
+) -> str | None:
+    """Which voice will actually read `name`, by name. None if none is configured.
+
+    Split out of get_voice because two places have to agree on the answer and they
+    used to disagree. The export plan recorded the voice a sentence *asked* for —
+    None for anything before the first marker — while the renderer stored the voice
+    that actually read it. The sentence cache is keyed on that value, so for a book
+    with no markers every key differed from the one it was stored under and the whole
+    cache missed: every export regenerated every sentence, silently, at ~40s each.
+
+    `available` lets a caller resolving hundreds of sentences load the library once;
+    load_voices stats every WAV.
+    """
+    voices = load_voices(settings) if available is None else available
+    if not voices:
+        return None
+    if name and name in voices:
+        return name
+    default = settings.default_voice
+    if default and default in voices:
+        return default
+    return next(iter(voices))
+
+
 def get_voice(settings: "config.Settings", name: str | None) -> VoiceReference | None:
     """Resolve a voice name. None (or an unknown name) falls back to the default voice,
     and if none is configured, to unconditioned generation."""
     voices = load_voices(settings)
-    if not voices:
-        return None
-    if name and name in voices:
-        return voices[name]
-    if name:
+    if name and voices and name not in voices:
         log.warning("Unknown voice %r; falling back to the default voice.", name)
-    default = settings.default_voice
-    if default and default in voices:
-        return voices[default]
-    return next(iter(voices.values()))
+    resolved = resolve_name(settings, name, voices)
+    return voices[resolved] if resolved else None
 
 
 def voice_names(settings: "config.Settings") -> list[str]:
@@ -118,6 +138,8 @@ def check_reference_readable(ref: VoiceReference) -> None:
     """
     import torchaudio
 
+    from . import ffmpeg_dlls
+
     try:
         audio, _ = torchaudio.load(str(ref.wav_path), channels_first=True)
     except Exception as e:  # noqa: BLE001 — any decode failure is fatal the same way
@@ -125,8 +147,11 @@ def check_reference_readable(ref: VoiceReference) -> None:
             f"Cannot read the reference audio for voice {ref.name!r} ({ref.wav_path}).\n\n"
             f"{type(e).__name__}: {str(e)[:300]}\n\n"
             "If this mentions libtorchcodec, FFmpeg's shared libraries are missing. "
-            "Install a shared build and reopen the app so it picks up the new PATH:\n"
+            "Install a shared build, then reopen the app so it can find them:\n"
             "    winget install Gyan.FFmpeg.Shared\n\n"
+            "DiaReader searches PATH and winget's package directory at startup. If "
+            f"your build lives elsewhere, point {ffmpeg_dlls.ENV_OVERRIDE} at the "
+            "directory holding avutil-*.dll.\n\n"
             "Alternatively remove every voice under Settings -> Voices; this "
             "checkpoint was fine-tuned without audio prompts, so unconditioned "
             "generation is a perfectly good default."

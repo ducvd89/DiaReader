@@ -13,7 +13,11 @@
 ;   ffmpeg and offers to fetch it rather than leaving the user to discover that.
 
 #define AppName "DiaReader"
-#define AppVersion "1.0.0"
+; Passed in by packaging\build.ps1, which reads it from diareader/__init__.py. The
+; fallback only applies to running ISCC by hand, and says so in the filename.
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
 #define AppPublisher "DiaReader"
 #define AppExe "DiaReader.exe"
 

@@ -25,7 +25,7 @@ def test_empty_audio_is_skipped_not_fatal():
     # dia's DAC decode raises when the model emits zero tokens; TtsEngine turns that
     # into empty audio, and one bad sentence must not abort a whole export.
     engine = FakeEngine([0.0, 0.0, 0.0])
-    audio = pipeline._generate_chunk(engine, "Quyển 2", None, "Ch. 1", 0)
+    audio = pipeline._generate_chunk(engine, "Quyển 2", None, "Ch. 1", 0).audio
 
     assert len(audio) > 0, "should substitute silence rather than return nothing"
     assert len(engine.calls) == pipeline._MAX_ATTEMPTS
@@ -81,7 +81,7 @@ def test_a_chunk_that_is_only_a_nonverbal_tag_is_not_judged_on_length():
 def test_long_text_retries_when_audio_is_too_short():
     text = "Đây là một câu văn dài " * 4  # ~92 chars -> ~4.5s expected
     engine = FakeEngine([0.5, 0.5, 4.6])
-    audio = pipeline._generate_chunk(engine, text, None, "Ch. 1", 0)
+    audio = pipeline._generate_chunk(engine, text, None, "Ch. 1", 0).audio
 
     assert len(engine.calls) == 3
     assert engine.calls[1][1].get("temperature") == pipeline._RETRY_TEMPERATURE

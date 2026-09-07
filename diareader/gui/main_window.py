@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 
 from PySide6.QtCore import Qt
@@ -12,13 +13,14 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel
 )
 
-from .. import chunking, config, naming, pipeline, text_extract, voice
+from .. import chunking, config, naming, pipeline, sentence_cache, text_extract, voice
 from ..model_loader import CudaNotAvailableError, free_vram, require_cuda
 from .export_dialog import ExportDialog
 from .script_editor import ScriptEditorDialog
+from .sentence_review import SentenceReviewDialog
 from .settings_dialog import SettingsDialog
 from .widgets import ChapterListWidget, LogBridge, PlayerControls, QtLogHandler
-from .workers import ExportWorker, ModelLoadWorker
+from .workers import AssembleWorker, ModelLoadWorker, RenderWorker
 
 log = logging.getLogger(__name__)
 
@@ -74,10 +76,21 @@ class MainWindow(QMainWindow):
         self.total_chunks = 0
         self.run_total_chunks = 0
         self.chunks_done = 0
+        # Rendering and assembling are two stages of one export, so the second has to
+        # be remembered while the first runs.
+        self._cache = None
+        self._pending_assembly = None
+        self._after_render = None
+        self.render_worker = None
+        self.assemble_worker = None
+        self.review_dialog = None
+        # Which chapter the open review table is showing, so that asking for a
+        # different one replaces it rather than raising the wrong window.
+        self._review_chapter: int | None = None
+        self.editor_dialog = None
         self.run_started_at: float | None = None
 
         self.load_worker: ModelLoadWorker | None = None
-        self.export_worker: ExportWorker | None = None
 
         self.chapter_list = ChapterListWidget()
         self.controls = PlayerControls()
@@ -125,6 +138,7 @@ class MainWindow(QMainWindow):
         self.controls.load_model_clicked.connect(self.load_model)
         self.controls.unload_model_clicked.connect(self.unload_model)
         self.controls.edit_script_clicked.connect(self.edit_script)
+        self.controls.review_sentences_clicked.connect(self.review_sentences)
         self.controls.stop_clicked.connect(self.stop)
         self.controls.export_clicked.connect(self.export)
 
@@ -409,6 +423,19 @@ class MainWindow(QMainWindow):
         """Chapters to render, or None for the whole book."""
         return self.chapter_list.selected_indices() or None
 
+    def _current_chapter(self) -> int | None:
+        """The one chapter being worked on, or None if the list says nothing.
+
+        Falls back to the row the list has focus on when nothing is explicitly
+        selected: clicking a chapter to read it is how a user says which one they
+        mean, and making them select it a second time is a step for nothing.
+        """
+        selected = self.chapter_list.selected_indices()
+        if selected:
+            return selected[0]
+        row = self.chapter_list.currentRow()
+        return row if 0 <= row < len(self.chapters) else None
+
     def _confirm_if_huge(self, action: str) -> bool:
         if self.total_chunks < self._HUGE_JOB_CHUNKS:
             return True
@@ -443,52 +470,128 @@ class MainWindow(QMainWindow):
         index = selected[0]
         chapter = self.chapters[index]
 
+        if self.editor_dialog is not None:
+            self.editor_dialog.raise_()
+            self.editor_dialog.activateWindow()
+            return
+
+        # No parent, deliberately. A parented window on Windows gets no taskbar
+        # button of its own, cannot be reached with alt-tab, and is pinned above the
+        # window that owns it — so editing a script hid the log that says how the
+        # rendering is going. Each of these is a window in its own right; whichever
+        # one you click is the one on top.
         dialog = ScriptEditorDialog(
-            self.settings, chapter.title, chapter.text, parent=self,
+            self.settings, chapter.title, chapter.text, parent=None,
             on_reset=lambda: self._original_chapter_text(index),
         )
         # Saving now leaves the dialog open, so the text arrives by signal rather than
         # being read off a closed dialog.
         dialog.script_saved.connect(lambda t, i=index: self._save_chapter_edit(i, t))
-        if not dialog.exec():
+        # Non-modal for the same reason the review table is: the two are used together,
+        # and a modal editor would block the Sentences window sitting beside it.
+        dialog.setModal(False)
+        dialog.finished.connect(
+            lambda result, d=dialog, i=index, c=chapter: self._script_editor_closed(
+                result, d, i, c
+            )
+        )
+        self.editor_dialog = dialog
+        dialog.show()
+
+    def _script_editor_closed(self, result, dialog, index, chapter) -> None:
+        """What used to follow `dialog.exec()`: save the script, and render if asked."""
+        self.editor_dialog = None
+        if not result:
             return
 
         text = dialog.script_text().strip()
         if not text:
-            QMessageBox.information(self, "Empty script", "There is nothing to export.")
+            QMessageBox.information(self, "Empty script", "There is nothing to render.")
             return
-
-        self._save_chapter_edit(index, text)
 
         if dialog.action() != "export":
+            self._save_chapter_edit(index, text)
             return
 
-        default_path = str(
-            Path(self.settings.output_dir) / f"{naming.safe_filename(chapter.title)}.mp3"
-        )
-        Path(self.settings.output_dir).mkdir(parents=True, exist_ok=True)
-        out_path, _ = QFileDialog.getSaveFileName(
-            self, "Export script", default_path, "MP3 (*.mp3);;WAV (*.wav)"
-        )
-        if not out_path:
+        # The opening voice becomes a marker in the script rather than a setting that
+        # travels alongside it. Casting belongs to the script — that is the whole
+        # reason Save final file no longer asks for a voice — and a choice held only
+        # in this combo would be lost the moment the editor closed, leaving the
+        # chapter to be re-rendered in whatever the default happened to be.
+        text = self._with_opening_marker(text, dialog.start_voice())
+        self._save_chapter_edit(index, text)
+
+        if not self._confirm_cache_room(text):
             return
 
-        edited = [text_extract.Chapter(title=chapter.title, text=text)]
         # This run renders the edited text of one chapter, so its total comes from
         # that text — not from the chapter list, whose selection is unrelated here.
         run_total = len(chunking.chunk_text(text))
+        self.controls.set_status(
+            f"Rendering {run_total} sentences of {chapter.title} into the cache…"
+        )
         self._ensure_engine(
             lambda: self._start_export(
                 SimpleNamespace(
-                    out_path=out_path,
-                    chapter_indices=[0],
-                    start_voice=dialog.start_voice(),
+                    out_path="",          # cache only; Save final file writes the file
+                    chapter_indices=[index],
+                    start_voice=None,     # the script says who reads what
                     speed=getattr(self.settings, "speed", 1.0),
                 ),
-                chapters=edited,
                 total_chunks=run_total,
             )
         )
+
+    def _with_opening_marker(self, text: str, start_voice: str | None) -> str:
+        """Put the editor's opening voice into the script, unless it is already cast.
+
+        Only when it differs from the voice an untouched script would get anyway, so
+        the common case leaves the text exactly as the user typed it.
+        """
+        if not start_voice or chunking.VOICE_MARKER.match(text.lstrip()):
+            return text
+        if start_voice == voice.resolve_name(self.settings, None):
+            return text
+        log.info("Writing the opening voice [%s] into the script.", start_voice)
+        return f"[{start_voice}] {text}"
+
+    def _confirm_cache_room(self, text: str) -> bool:
+        """Warn before a chapter that will not fit under the cache limit.
+
+        Rendering is the only thing that grows the cache, so this is the moment the
+        user can still decide. Going ahead is allowed: the limit prunes other books'
+        takes and this book's rejected ones first, and never a take the book is made
+        of — but that pruning is worth knowing about before it happens rather than
+        after.
+        """
+        limit_gb = getattr(self.settings, "cache_limit_gb", 0.0) or 0.0
+        if limit_gb <= 0:
+            return True
+        needed = sentence_cache.estimated_bytes(
+            chunking.chunk_text(text), self.settings.speed
+        )
+        used = sentence_cache.total_size()
+        limit = int(limit_gb * 1024 ** 3)
+        if used + needed <= limit:
+            return True
+
+        def mb(value: int) -> str:
+            if value >= 1024 ** 3:
+                return f"{value / 1024 ** 3:.2f} GB"
+            return f"{value / 1024 ** 2:.0f} MB"
+
+        answer = QMessageBox.question(
+            self, "Cache limit",
+            f"This chapter is roughly {mb(needed)} of audio, and the cache already "
+            f"holds {mb(used)} against a limit of {limit_gb:g} GB.\n\n"
+            "Going ahead will drop other books' cached sentences, oldest first, and "
+            "then the takes here that you never adopted. Sentences this book is "
+            "actually made of are never deleted.\n\n"
+            "Render anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _save_chapter_edit(self, index: int, text: str) -> None:
         """Persist one chapter's edited text (and its voice markers).
@@ -534,12 +637,13 @@ class MainWindow(QMainWindow):
     # --- export ------------------------------------------------------------------
 
     def stop(self) -> None:
-        """Cancel a running export. It stops after the current sentence rather than
-        mid-generation, and the partial WAV is kept."""
-        if self.export_worker and self.export_worker.isRunning():
-            self.export_worker.cancel()
-            self.controls.set_status("Cancelling after the current sentence…")
-            return
+        """Cancel whatever is generating. It stops after the current sentence rather
+        than mid-generation, and every sentence already rendered stays in the cache."""
+        for worker in (self.render_worker,):
+            if worker is not None and worker.isRunning():
+                worker.cancel()
+                self.controls.set_status("Cancelling after the current sentence…")
+                return
         self.controls.set_idle(model_loaded=self.engine is not None)
 
     def export(self) -> None:
@@ -551,8 +655,9 @@ class MainWindow(QMainWindow):
 
         dialog = ExportDialog(
             self.settings,
-            [self.chapter_list.item(i).text() for i in range(self.chapter_list.count())],
+            [c.title for c in self.chapters],
             self.chunks_per_chapter,
+            cached_per_chapter=self._cached_per_chapter(),
             preselected=self.chapter_list.selected_indices() or None,
             default_path=default_path,
             parent=self,
@@ -561,7 +666,10 @@ class MainWindow(QMainWindow):
             return
         request = dialog.request()
         if request is None:
-            QMessageBox.information(self, "No destination", "Choose where to save the file.")
+            QMessageBox.information(
+                self, "Nothing to save",
+                "Choose where to save the file and tick at least one chapter.",
+            )
             return
 
         # Counted from the range the dialog returned, not from the list selection,
@@ -570,27 +678,206 @@ class MainWindow(QMainWindow):
         run_total = self._count_selected(request.chapter_indices)
         self._ensure_engine(lambda: self._start_export(request, total_chunks=run_total))
 
+    def _cached_per_chapter(self) -> dict[int, int]:
+        """Sentences with a usable take, per chapter, as the book currently reads.
+
+        Counted against the current plan rather than against the manifest: a take for
+        text that has since been edited is not audio for this book any more, and
+        offering the chapter as "rendered" on the strength of it would write the old
+        sentence into the file.
+        """
+        if not self.current_book_path:
+            return {}
+        plan = pipeline.sentence_plan(self.chapters, self.settings)
+        cache = self._sentence_cache()
+        speed = self.settings.speed
+        gaps = set(cache.missing(
+            [(p.chapter_index, p.position, p.text, p.voice) for p in plan], speed
+        ))
+        counts: dict[int, int] = {}
+        for planned in plan:
+            if (planned.chapter_index, planned.position) not in gaps:
+                counts[planned.chapter_index] = counts.get(planned.chapter_index, 0) + 1
+        return counts
+
     def _start_export(self, request, chapters=None, *, total_chunks: int | None = None) -> None:
-        self.chunks_done = 0
-        self.run_started_at = time.monotonic()
-        self.run_total_chunks = (
-            total_chunks if total_chunks is not None else self.total_chunks
-        )
-        self.controls.set_running(total=self.run_total_chunks)
-        self.controls.set_status(f"Exporting to {Path(request.out_path).name}…")
-        self.export_worker = ExportWorker(
-            self.current_book_path, request.out_path, self.engine, self.settings,
+        """Render whatever the cache is missing, then assemble the file from it.
+
+        Two stages rather than one stream to disk. What that buys is the ability to
+        stop at the end of the first: the sentences are on disk individually, so a
+        chapter with three bad ones in it can have those three redone instead of all
+        four hundred. It also means a run interrupted at sentence 900 keeps the 900.
+
+        The two stages are also separately reachable, and that is the shape of the app
+        now: the script editor runs the first (`request.out_path` empty, audio into the
+        cache) and Save final file runs the second.
+        """
+        chapters = chapters if chapters is not None else self.chapters
+        plan = pipeline.sentence_plan(
+            chapters, self.settings,
             chapter_indices=request.chapter_indices,
             start_voice=request.start_voice,
-            chapters=chapters if chapters is not None else self.chapters,
-            speed=request.speed,
         )
-        self.export_worker.progress.connect(self._on_export_progress)
-        self.export_worker.stage.connect(self._on_export_stage)
-        self.export_worker.finished_ok.connect(self._on_export_finished)
-        self.export_worker.cancelled.connect(self._on_export_cancelled)
-        self.export_worker.failed.connect(self._on_export_failed)
-        self.export_worker.start()
+        cache = self._sentence_cache()
+        speed = request.speed if request.speed is not None else self.settings.speed
+        gaps = set(cache.missing(
+            [(p.chapter_index, p.position, p.text, p.voice) for p in plan], speed
+        ))
+        todo = [p for p in plan if (p.chapter_index, p.position) in gaps]
+        destination = (request.out_path or "").strip()
+
+        self._pending_assembly = (
+            (cache, plan, destination, speed) if destination else None
+        )
+        if not todo:
+            if destination:
+                self._assemble_pending()
+            else:
+                self.controls.set_status(
+                    f"All {len(plan)} sentences are already rendered."
+                )
+                self._finish_export()
+            return
+
+        self.chunks_done = 0
+        self.run_started_at = time.monotonic()
+        self.run_total_chunks = len(todo)
+        self.controls.set_running(total=self.run_total_chunks)
+        reused = len(plan) - len(todo)
+        target = f" for {Path(destination).name}" if destination else ""
+        self.controls.set_status(
+            f"Rendering {len(todo)} sentences"
+            + (f" ({reused} already cached)" if reused else "")
+            + f"{target}…"
+        )
+        self._start_render(
+            cache, todo, speed,
+            then=self._assemble_pending if destination else None,
+        )
+
+    def _sentence_cache(self):
+        """The take cache for the book that is open, made once and kept."""
+        if (self._cache is None
+                or str(self._cache.book_path) != str(Path(self.current_book_path))):
+            self._cache = sentence_cache.SentenceCache(self.current_book_path)
+        return self._cache
+
+    def _start_render(self, cache, plan, speed, *, then=None, in_use: bool = True) -> None:
+        self._after_render = then
+        self.render_worker = RenderWorker(
+            self.engine, self.settings, cache, plan, speed=speed, in_use=in_use
+        )
+        self.render_worker.progress.connect(self._on_export_progress)
+        self.render_worker.stage.connect(self._on_export_stage)
+        self.render_worker.finished_ok.connect(self._on_render_finished)
+        self.render_worker.cancelled.connect(self._on_export_cancelled)
+        self.render_worker.failed.connect(self._on_export_failed)
+        self.render_worker.start()
+
+    def _on_render_finished(self, written: int) -> None:
+        if self.review_dialog is not None:
+            self.review_dialog.set_running(False)
+            self.review_dialog.refresh_all()
+        after = self._after_render
+        self._after_render = None
+        if after is not None:
+            after()
+            return
+        self._finish_export()
+        self.controls.set_status(f"Rendered {written} sentences.")
+
+    def _assemble_pending(self) -> None:
+        if self._pending_assembly is None:
+            self._finish_export()
+            return
+        cache, plan, out_path, speed = self._pending_assembly
+        self._pending_assembly = None
+        self.controls.set_status(f"Writing {Path(out_path).name}…")
+        self.assemble_worker = AssembleWorker(cache, plan, out_path, speed=speed)
+        self.assemble_worker.stage.connect(self._on_export_stage)
+        self.assemble_worker.finished_ok.connect(self._on_export_finished)
+        self.assemble_worker.failed.connect(self._on_export_failed)
+        self.assemble_worker.start()
+
+    def review_sentences(self) -> None:
+        """The table of sentences for the chapter being worked on.
+
+        One chapter, never the whole book. A book here runs to 255k sentences and the
+        table builds eight widgets a row; more to the point, this is where a chapter is
+        gone through failure by failure, and a list spanning every other chapter is a
+        list you have to search before you can start.
+        """
+        if not self._require_book():
+            return
+        index = self._current_chapter()
+        if index is None:
+            QMessageBox.information(
+                self, "Pick a chapter", "Select the chapter you want to go through."
+            )
+            return
+
+        if self.review_dialog is not None:
+            if self._review_chapter == index:
+                self.review_dialog.raise_()
+                self.review_dialog.activateWindow()
+                return
+            # Showing a different chapter now, so the open window is stale rather than
+            # the one being asked for.
+            self.review_dialog.close()
+
+        plan = pipeline.sentence_plan(
+            self.chapters, self.settings, chapter_indices=[index]
+        )
+        if not plan:
+            QMessageBox.information(
+                self, "Nothing to show",
+                f"{self.chapters[index].title} has no sentences in it.",
+            )
+            return
+
+        # Parentless for the same reason the editor is: this table is worked through
+        # for as long as re-rendering takes, and the log has to stay reachable.
+        dialog = SentenceReviewDialog(plan, self._sentence_cache(), self.settings, None)
+        dialog.setWindowTitle(f"Sentences — {self.chapters[index].title}")
+        self._review_chapter = index
+        dialog.render_requested.connect(self._render_from_review)
+        dialog.finished.connect(self._review_closed)
+        self.review_dialog = dialog
+        # Shown, not exec()'d. A chapter is worked through here for as long as it takes
+        # to re-render its bad sentences, and a modal loop would lock the script editor
+        # and the main window for all of it — including the chapter list this table's
+        # own selection came from.
+        dialog.show()
+
+    def _review_closed(self) -> None:
+        self.review_dialog = None
+        self._review_chapter = None
+        cache = self._sentence_cache()
+        cache.save()
+        sentence_cache.enforce_limit(self.settings.cache_limit_gb, keep=cache)
+
+    def _render_from_review(self, planned, voice_name) -> None:
+        """Re-render the ticked sentences, optionally recasting them.
+
+        A chosen voice rewrites the plan rather than the book: the take is stored
+        against that voice, and the script itself keeps whatever markers it had.
+        """
+        if voice_name:
+            planned = [replace(p, voice=voice_name) for p in planned]
+        speed = self.settings.speed
+        dialog = self.review_dialog
+        if dialog is not None:
+            dialog.set_running(True, len(planned))
+
+        def start():
+            self.chunks_done = 0
+            self.run_started_at = time.monotonic()
+            self.run_total_chunks = len(planned)
+            self.controls.set_running(total=len(planned))
+            self.controls.set_status(f"Rendering {len(planned)} sentences…")
+            self._start_render(self._sentence_cache(), planned, speed)
+
+        self._ensure_engine(start)
 
     def _on_export_stage(self, message: str) -> None:
         """Phases outside the per-sentence loop (parsing, MP3 transcode) — long enough
@@ -609,7 +896,19 @@ class MainWindow(QMainWindow):
         )
 
     def _finish_export(self) -> None:
-        self.export_worker = None
+        self.render_worker = None
+        self.assemble_worker = None
+        self._pending_assembly = None
+        self._after_render = None
+        if self._cache is not None:
+            self._cache.save()
+            # A run is the only thing that grows the cache, so this is where it is
+            # brought back under the user's limit — never mid-render, where deleting a
+            # file the assembly step is about to read would be the bug this avoids.
+            sentence_cache.enforce_limit(self.settings.cache_limit_gb, keep=self._cache)
+        if self.review_dialog is not None:
+            self.review_dialog.set_running(False)
+            self.review_dialog.refresh_all()
         self.controls.set_idle(model_loaded=self.engine is not None)
 
     def _on_export_finished(self, out_path: str) -> None:
@@ -641,13 +940,20 @@ class MainWindow(QMainWindow):
         several GB of VRAM occupied even once the window is gone, which looks exactly
         like the app "not letting go" of the card.
         """
-        if self.export_worker and self.export_worker.isRunning():
-            self.export_worker.cancel()
-            if not self.export_worker.wait(15000):
-                log.warning("Export thread did not stop in time; terminating it.")
-                self.export_worker.terminate()
-                self.export_worker.wait(2000)
-        self.export_worker = None
+        if self.render_worker is not None and self.render_worker.isRunning():
+            self.render_worker.cancel()
+            if not self.render_worker.wait(15000):
+                log.warning("Render thread did not stop in time; terminating it.")
+                self.render_worker.terminate()
+                self.render_worker.wait(2000)
+        self.render_worker = None
+        # Assembling only reads the cache and writes a file, so it finishes quickly
+        # and has nothing to cancel — waiting is enough.
+        if self.assemble_worker is not None and self.assemble_worker.isRunning():
+            self.assemble_worker.wait(30000)
+        self.assemble_worker = None
+        if self._cache is not None:
+            self._cache.save()
         if self.load_worker and self.load_worker.isRunning():
             # A load in flight can't be cancelled safely, so wait it out rather than
             # tearing down CUDA underneath it.
@@ -659,5 +965,13 @@ class MainWindow(QMainWindow):
             self.engine = None
             remaining = free_vram()
             log.info("Released model on close; %.1f GB CUDA memory still allocated", remaining)
+
+        # These have no parent, so Qt will not take them down with this window — and a
+        # surviving top-level widget keeps the application alive with no way back to it.
+        for window in (self.editor_dialog, self.review_dialog):
+            if window is not None:
+                window.close()
+        self.editor_dialog = None
+        self.review_dialog = None
 
         event.accept()

@@ -25,6 +25,7 @@ import torch
 from huggingface_hub import hf_hub_download
 
 from . import config
+from .hf_cache import resolve_download
 
 log = logging.getLogger(__name__)
 
@@ -211,7 +212,7 @@ def load_model(
     # Dia.from_pretrained would also pull ~6.1 GB of base weights, and every one of those
     # 343 tensors is then overwritten by the fine-tune, so downloading them is pure waste.
     stage(f"Fetching architecture config from {config.BASE_MODEL_REPO}…")
-    base_config_path = Path(
+    base_config_path = resolve_download(
         hf_hub_download(
             config.BASE_MODEL_REPO,
             config.BASE_CONFIG_FILE,
@@ -221,7 +222,7 @@ def load_model(
     )
 
     stage(f"Downloading fine-tuned weights {config.FINETUNE_REPO} (~6.1 GB on first run)…")
-    weights_path = Path(
+    weights_path = resolve_download(
         hf_hub_download(
             config.FINETUNE_REPO,
             config.FINETUNE_WEIGHTS_FILE,
@@ -229,7 +230,7 @@ def load_model(
             cache_dir=str(config.MODEL_CACHE_DIR),
         )
     )
-    config_path = Path(
+    config_path = resolve_download(
         hf_hub_download(
             config.FINETUNE_REPO,
             config.FINETUNE_CONFIG_FILE,

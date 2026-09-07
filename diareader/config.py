@@ -35,6 +35,7 @@ BASE_CONFIG_FILE = "config.json"
 SAMPLE_RATE = 44100
 
 
+
 DEFAULT_VOICE_NAME = "GiongMacDinh"
 
 # How many books the File menu offers to reopen.
@@ -105,29 +106,41 @@ class Settings:
     # run this on an older stack: a hard abort, not an exception, so nothing can
     # catch it — turn this off in Settings if the app dies at the first sentence.
     use_torch_compile: bool = True
-    # How a generated sentence is judged before the pipeline accepts it.
+    # Whether each generated sentence is checked before the pipeline accepts it.
+    # "asr" transcribes it with a small Vietnamese speech model on the CPU and compares
+    # how many syllables were recognised against how many the text asks for; "off"
+    # leaves only the crude length comparison in pipeline._judge.
     #
-    #   "syllables" (default) — count vowel nuclei in the waveform and compare with
-    #       the syllable count of the text. No model, no VRAM, a millisecond of
-    #       numpy. Recovers the true count to within 7.1% on human speech, and is
-    #       checked both ways: too few means dropped words, too many means looping.
-    #   "duration" — the original: compare audio length against what the text should
-    #       take. Kept because it is what shipped, but measured not to work — it
-    #       flagged sentences averaging 90.2% of their words present while passing
-    #       ones averaging 88.9%, and passed a heading rendered as pure noise at 269%.
-    #
-    # A Whisper-based mode was built and removed: transcription answers far more than
-    # "did it say everything", and loading it beside Dia crashed the app outright.
-    verify_mode: str = "syllables"
+    # Two other checkers lived here and were removed rather than kept as options.
+    # "duration" compared audio length against the text and was measured not to work:
+    # sentences it flagged averaged 90.2% of their words present while ones it passed
+    # averaged 88.9%. "syllables" counted peaks in the energy envelope, which was much
+    # better but still could not resolve five syllables in a one-second greeting and
+    # could not see a substitution at all — it scored a sentence that said "dạ em chào
+    # ạ" a perfect 5 of 5. See asr_verify for the measurements that retired it.
+    verify_mode: str = "asr"
     # Level every generated sentence to the same loudness. On by default because the
     # model's output level varies by voice well beyond what the reference clips
     # explain: with all six references normalised to -20 LUFS, the narration they
     # produced still spanned 10.1 LU. Without this, a book that switches voices makes
     # the listener reach for the volume.
     normalize_output: bool = True
+    # How much disk the per-sentence take cache may use, in GB; 0 means no limit.
+    #
+    # The cache is what makes a single bad sentence fixable without regenerating the
+    # chapter around it, so it is worth real disk — one 40-sentence chapter with its
+    # rejected takes came to 22 MB, which puts a full book in the hundreds of MB and a
+    # shelf of them past any figure a user would guess. 2 GB holds several books and
+    # still fits on a laptop; see sentence_cache.enforce_limit for what goes first.
+    cache_limit_gb: float = 2.0
     # Script editor text size, remembered so a zoom set for comfortable reading is
     # not undone every time the editor is reopened.
     script_font_pt: int = 11
+    # Sentence table text size, remembered for the same reason. Smaller than the
+    # editor's default on purpose: that surface is prose to be read, this one is a
+    # list to be scanned, and rows fit the text so the size decides how much of a
+    # four-hundred-sentence chapter is on screen at once.
+    sentences_font_pt: int = 10
     output_dir: str = str(Path.home() / "Music" / "DiaReader")
     # Books opened before, newest first, capped at RECENT_BOOKS_LIMIT.
     recent_books: list = field(default_factory=list)

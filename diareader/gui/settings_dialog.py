@@ -13,6 +13,20 @@ from .. import config, voice, voice_backup
 from .widgets import SPEED_CHOICES, speed_label
 
 
+_VERIFY_HINT = (
+        "Transcribes each sentence with a small Vietnamese speech model and counts "
+        "what it recognised. The words themselves are never compared, so vocabulary "
+        "the recogniser has never seen — a cultivation novel's jargon — still counts "
+        "right. On seventeen human reference clips it reads the true syllable count "
+        "with <b>2.8%</b> spread, against 6.9% for peak counting, and it is the only "
+        "check here that caught a sentence which said <i>“dạ em chào ạ”</i> — peak "
+        "counting scored that one a perfect 5 of 5.<br>"
+    "Runs on the <b>CPU</b>, about 0.2s a sentence, and never touches the GPU.<br>"
+    "Unchecked, only the crude length comparison remains, which was measured not to "
+    "work: sentences it flagged averaged <b>90.2%</b> of their words present while "
+    "ones it passed averaged <b>88.9%</b>."
+)
+
 # Keys match config.PRECISION_CHOICES; order is the order they are offered.
 _PRECISION_LABELS = {
     "float32": "float32 — what the checkpoint is (recommended)",
@@ -436,28 +450,21 @@ class SettingsDialog(QDialog):
         compile_hint.setWordWrap(True)
         compile_hint.setStyleSheet("color: gray;")
 
-        self.verify_check = QCheckBox("Check each sentence by counting the sounds in it")
+        self.verify_check = QCheckBox("Check each sentence by listening to it")
         self.verify_check.setChecked(
-            getattr(settings, "verify_mode", "syllables") == "syllables"
+            getattr(settings, "verify_mode", config.Settings().verify_mode) != "off"
         )
-        verify_hint = QLabel(
-            "Vietnamese is monosyllabic, so one syllable is one peak in the audio. "
-            "Counting them and comparing with the text catches both failures this "
-            "model has — dropping words and looping a fragment — and costs nothing: "
-            "no extra model, a millisecond per sentence. On the six voice reference "
-            "clips it recovers the true syllable count to within <b>7.1%</b>.<br>"
-            "Unchecked, it falls back to comparing the audio's <i>length</i> against "
-            "the text, which was measured not to work: sentences it flagged averaged "
-            "<b>90.2%</b> of their words present while ones it passed averaged "
-            "<b>88.9%</b>, and it passed a heading rendered as pure noise at "
-            "<b>269%</b>."
-        )
+        verify_hint = QLabel(_VERIFY_HINT)
         verify_hint.setWordWrap(True)
         verify_hint.setStyleSheet("color: gray;")
 
         speed_hint = QLabel(
-            "Applied to exported audio without shifting pitch — the narrator "
-            "keeps sounding like the reference voice."
+            "Slowing down lengthens the gaps between sounds and between sentences "
+            "rather than drawing each syllable out, so the narrator still speaks at a "
+            "natural rate — just with more room to breathe. Below about 0.75x there "
+            "is not enough silence to take it all, and the speech itself is stretched "
+            "for the remainder. Pitch never shifts, so the voice keeps sounding like "
+            "its reference."
         )
         speed_hint.setWordWrap(True)
         speed_hint.setStyleSheet("color: gray;")
@@ -513,10 +520,8 @@ class SettingsDialog(QDialog):
             self.settings.use_tf32 = config.resolve_precision(self.settings.precision)[1]
         if self.compile_check.isEnabled():
             self.settings.use_torch_compile = self.compile_check.isChecked()
-        # Not locked to the model's lifetime — it holds no model of its own, so it can
-        # be switched for the next export without unloading Dia.
-        self.settings.verify_mode = (
-            "syllables" if self.verify_check.isChecked() else "duration"
-        )
+        # Not locked to the model's lifetime. The ASR checker does hold a model, but
+        # on the CPU — switching it for the next export never touches Dia's VRAM.
+        self.settings.verify_mode = "asr" if self.verify_check.isChecked() else "off"
         self.settings.save()
         return self.settings

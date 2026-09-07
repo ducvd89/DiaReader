@@ -11,14 +11,16 @@ import re
 
 from PySide6.QtCore import QMimeData, Qt, Signal
 from PySide6.QtGui import (
-    QColor, QDrag, QFont, QPalette, QSyntaxHighlighter, QTextCharFormat, QTextCursor
+    QColor, QDrag, QFont, QGuiApplication, QPalette, QSyntaxHighlighter, QTextCharFormat,
+    QTextCursor
 )
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QComboBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QLabel,
     QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 )
 
 from .. import chunking, config, voice
+from .flow_layout import wrapping_row
 
 log = logging.getLogger(__name__)
 
@@ -364,6 +366,15 @@ class ScriptEditorDialog(QDialog):
                  on_reset=None):
         super().__init__(parent)
         self.setWindowTitle(f"Script — {title}")
+        # A QDialog gets only a close button from Windows. This is not a transient
+        # prompt — it is where a whole chapter is cast and edited, sat with for a long
+        # time beside other windows — so it earns the minimise and maximise a normal
+        # window has.
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
         self.resize(900, 640)
         self.settings = settings
         self.chapter_title = title
@@ -386,30 +397,37 @@ class ScriptEditorDialog(QDialog):
             base_colour=self.editor.palette().color(QPalette.ColorRole.Base),
         )
 
-        palette_row = QHBoxLayout()
-        palette_row.addWidget(QLabel("Voices:"))
+        # Wrapping, not a single row: a library of seventeen voices ran the chips off
+        # the right-hand edge and widened the dialog past the screen with them. The
+        # label goes inside the flow rather than beside it so that the first chip sits
+        # next to it on narrow windows instead of being pushed onto its own line.
+        palette_items = [QLabel("Voices:")]
         if names:
             for name in names:
                 chip = VoiceChip(name, library=names)
                 chip.mouseDoubleClickEvent = (
                     lambda _e, n=name: self.editor.insert_marker(n)
                 )
-                palette_row.addWidget(chip)
+                palette_items.append(chip)
         else:
             hint = QLabel("(no voices configured — add some under Settings → Voices)")
             hint.setStyleSheet("color: gray;")
-            palette_row.addWidget(hint)
-        palette_row.addStretch(1)
+            palette_items.append(hint)
+        self.voice_palette = wrapping_row(palette_items)
 
-        nonverbal_box = QGroupBox("Non-verbal")
-        nonverbal_grid = QGridLayout(nonverbal_box)
-        nonverbal_grid.setSpacing(4)
+        # Was a QGridLayout at a fixed seven columns, which wraps but only ever at that
+        # one width: too wide on a narrow window, and leaving empty space on a wide
+        # one. The flow layout wraps at whatever width the box actually has.
         self.nonverbal_buttons = []
-        for i, tag in enumerate(NONVERBAL_TAGS):
+        for tag in NONVERBAL_TAGS:
             button = NonverbalButton(tag)
             button.clicked.connect(lambda _checked=False, t=tag: self.editor.insert_tag(t))
-            nonverbal_grid.addWidget(button, i // 7, i % 7)
             self.nonverbal_buttons.append(button)
+
+        nonverbal_box = QGroupBox("Non-verbal")
+        nonverbal_layout = QVBoxLayout(nonverbal_box)
+        nonverbal_layout.setContentsMargins(6, 6, 6, 6)
+        nonverbal_layout.addWidget(wrapping_row(self.nonverbal_buttons, spacing=4))
 
         self.start_voice_combo = QComboBox()
         if names:
@@ -420,8 +438,21 @@ class ScriptEditorDialog(QDialog):
             self.start_voice_combo.addItem("(model default)")
             self.start_voice_combo.setEnabled(False)
 
+        # Word wrap on every label in this row, and it is not cosmetic. A QLabel with
+        # wrapping off reports its whole text as its *minimum* width, and QHBoxLayout
+        # adds those minimums up — this one row demanded 1548px, which became the
+        # dialog's minimum width and put its edges off the side of the screen with no
+        # way to drag them back. Wrapping lets each label collapse instead.
+        start_label = QLabel("Voice before the first marker:")
+        self.start_voice_combo.setToolTip(
+            "Who reads the text ahead of the first marker. Rendering writes this into "
+            "the script as a marker of its own when it is not the default voice, so "
+            "the casting lives in the script rather than being remembered separately."
+        )
+        start_label.setWordWrap(True)
+
         start_row = QHBoxLayout()
-        start_row.addWidget(QLabel("Voice before the first marker:"))
+        start_row.addWidget(start_label)
         start_row.addWidget(self.start_voice_combo)
         start_row.addStretch(1)
         self.dirty_placeholder = None
@@ -433,8 +464,10 @@ class ScriptEditorDialog(QDialog):
         # the row's emphasis while the static summary beside it stays plain.
         self.position_label = QLabel()
         self.position_label.setStyleSheet("font-weight: 600;")
+        self.position_label.setWordWrap(True)
         start_row.addWidget(self.position_label)
         self.summary = QLabel()
+        self.summary.setWordWrap(True)
         start_row.addWidget(self.summary)
 
         hint = QLabel(
@@ -471,7 +504,7 @@ class ScriptEditorDialog(QDialog):
         self.dirty_label.setStyleSheet("color: gray;")
 
         self.save_button = QPushButton("Save tags")
-        self.export_button = QPushButton("Export this script…")
+        self.export_button = QPushButton("Render this script")
         self.close_button = QPushButton("Close")
         # Laid out by hand rather than with QDialogButtonBox: its role-based ordering
         # put Close between Export and Save, so the two things you actually do with a
@@ -480,6 +513,12 @@ class ScriptEditorDialog(QDialog):
             "Save the text and voice markers as they stand and keep editing — the "
             "window stays open. Next time you export this book, these tags are already "
             "in place."
+        )
+        self.export_button.setToolTip(
+            "Generate every sentence of this chapter into the cache. No file is "
+            "written here — the audio is kept per sentence so a bad one can be "
+            "redone on its own, and “Save final file” builds the MP3 from "
+            "whatever is in the cache when you ask for it."
         )
         self.save_button.clicked.connect(self._save_without_closing)
         self.export_button.clicked.connect(self._accept_as("export"))
@@ -496,13 +535,39 @@ class ScriptEditorDialog(QDialog):
         button_row.addWidget(self.close_button)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(palette_row)
+        layout.addWidget(self.voice_palette)
         layout.addWidget(self.editor, stretch=1)
         layout.addWidget(nonverbal_box)
         layout.addLayout(start_row)
         layout.addWidget(hint)
         layout.addLayout(button_row)
 
+        self._fit_to_screen()
+
+        self._install_signal_handlers()
+
+    def _fit_to_screen(self) -> None:
+        """Never open larger than the screen it opens on.
+
+        resize() asks for 900x640, but a dialog is only ever as small as its layout's
+        minimum allows — and the two bugs behind this method (a non-wrapping chip row,
+        then labels reporting their whole text as a minimum) both pushed that minimum
+        past what a laptop can show, leaving the lower half of the window unreachable.
+        Both are fixed, so this is the guard rather than the cure: it keeps a future
+        one from being invisible, and it is what makes the maximise button meaningful
+        on a screen smaller than the design size.
+        """
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        # Room for the title bar and whatever the desktop reserves around a window.
+        margin = 80
+        width = min(self.width(), available.width() - margin)
+        height = min(self.height(), available.height() - margin)
+        self.resize(max(width, 1), max(height, 1))
+
+    def _install_signal_handlers(self) -> None:
         self.editor.textChanged.connect(self._update_summary)
         self.editor.textChanged.connect(self._update_position)
         self.editor.textChanged.connect(self._update_dirty)

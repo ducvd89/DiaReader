@@ -57,7 +57,8 @@ class LogBridge(QObject):
     loggers that fire on QThread workers without touching widgets directly.
     """
 
-    message = Signal(str, int)  # formatted text, levelno
+    # formatted text, levelno, outcome tag ("" when the record carries none)
+    message = Signal(str, int, str)
 
 
 class QtLogHandler(logging.Handler):
@@ -67,7 +68,13 @@ class QtLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self.bridge.message.emit(self.format(record), record.levelno)
+            # `outcome` is set by pipeline.py through logging's `extra=`, on the lines
+            # that say a sentence was accepted. Passing the tag rather than matching
+            # the message text keeps the colouring from breaking the next time that
+            # wording changes.
+            self.bridge.message.emit(
+                self.format(record), record.levelno, getattr(record, "outcome", "") or ""
+            )
         except RuntimeError:
             pass  # window already torn down
 
@@ -81,6 +88,13 @@ class LogPanel(QPlainTextEdit):
         logging.ERROR: "#c0392b",
         logging.CRITICAL: "#c0392b",
     }
+    # A sentence the pipeline accepted. Green so a chapter's log reads as a column of
+    # outcomes — every sentence now reports its score, and the eye needs to separate
+    # "accepted at 96%" from the retries around it without reading either.
+    _PASS_COLOUR = "#3fb950"
+    # Everything else. Explicit rather than inherited so ordinary progress lines keep
+    # one colour whatever the widget's palette happens to be.
+    _INFO_COLOUR = "#ffffff"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -91,15 +105,15 @@ class LogPanel(QPlainTextEdit):
         font.setPointSize(9)
         self.setFont(font)
 
-    def append_record(self, text: str, levelno: int) -> None:
-        colour = self._COLOURS.get(levelno)
-        if colour:
-            escaped = (
-                text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            )
-            self.appendHtml(f'<span style="color:{colour};">{escaped}</span>')
+    def append_record(self, text: str, levelno: int, outcome: str = "") -> None:
+        # A pass wins over its level: an accepted sentence is logged at INFO, and the
+        # point of the colour is to mark the outcome rather than the severity.
+        if outcome == "pass":
+            colour = self._PASS_COLOUR
         else:
-            self.appendPlainText(text)
+            colour = self._COLOURS.get(levelno, self._INFO_COLOUR)
+        escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        self.appendHtml(f'<span style="color:{colour};">{escaped}</span>')
         self.moveCursor(QTextCursor.MoveOperation.End)
 
 
@@ -107,6 +121,7 @@ class PlayerControls(QWidget):
     load_model_clicked = Signal()
     unload_model_clicked = Signal()
     edit_script_clicked = Signal()
+    review_sentences_clicked = Signal()
     stop_clicked = Signal()
     export_clicked = Signal()
 
@@ -133,19 +148,31 @@ class PlayerControls(QWidget):
         self.edit_script_button.setToolTip(
             "Cast the selected chapter: drag voice markers into the text, then export it."
         )
+        self.review_button = QPushButton("Sentences…")
+        self.review_button.setToolTip(
+            "Every sentence of the selection, with the check's verdict on each. Tick "
+            "the bad ones to render them again — in another voice if that helps — "
+            "listen to the result, and keep it or leave the old one."
+        )
         self.stop_button = QPushButton("Stop")
-        self.export_button = QPushButton("Export…")
+        self.export_button = QPushButton("Save final file…")
+        self.export_button.setToolTip(
+            "Assemble the cached sentences into a WAV or MP3. Anything not rendered "
+            "yet is generated first."
+        )
 
         self.load_model_button.clicked.connect(self.load_model_clicked)
         self.unload_model_button.clicked.connect(self.unload_model_clicked)
         self.edit_script_button.clicked.connect(self.edit_script_clicked)
+        self.review_button.clicked.connect(self.review_sentences_clicked)
         self.stop_button.clicked.connect(self.stop_clicked)
         self.export_button.clicked.connect(self.export_clicked)
 
         buttons = QHBoxLayout()
         for b in (
             self.load_model_button, self.unload_model_button,
-            self.edit_script_button, self.export_button, self.stop_button,
+            self.edit_script_button, self.review_button,
+            self.export_button, self.stop_button,
         ):
             buttons.addWidget(b)
 
@@ -167,6 +194,7 @@ class PlayerControls(QWidget):
         self.load_model_button.setText("Model loaded" if model_loaded else "Load model")
         self.unload_model_button.setEnabled(model_loaded)
         self.edit_script_button.setEnabled(True)
+        self.review_button.setEnabled(True)
         self.export_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.progress_bar.setVisible(False)
@@ -179,6 +207,7 @@ class PlayerControls(QWidget):
         # it is rendering — so tagging the *next* chapter while this one generates is
         # both safe and the obvious thing to want to do with the wait.
         self.edit_script_button.setEnabled(True)
+        self.review_button.setEnabled(False)
         self.export_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.progress_bar.setVisible(True)
@@ -193,6 +222,7 @@ class PlayerControls(QWidget):
         self.load_model_button.setEnabled(False)
         self.unload_model_button.setEnabled(False)
         self.edit_script_button.setEnabled(True)  # see set_running
+        self.review_button.setEnabled(False)
         self.export_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.progress_bar.setVisible(True)

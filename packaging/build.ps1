@@ -21,6 +21,11 @@ Set-Location $root
 $python = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) { throw "No venv at $python — see README section 2." }
 
+# The version comes from the package rather than being repeated here or in the .iss.
+$version = & $python -c "import diareader; print(diareader.__version__)"
+if ($LASTEXITCODE -ne 0 -or -not $version) { throw "Could not read diareader.__version__" }
+Write-Host "==> DiaReader $version" -ForegroundColor Cyan
+
 # The build machine's PATH may predate the FFmpeg install; PyInstaller needs to be
 # able to import torchcodec to collect it.
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
@@ -49,7 +54,7 @@ $iscc = @(
 if (-not $iscc) { throw "Inno Setup not found. winget install JRSoftware.InnoSetup" }
 
 Write-Host "==> Building the installer" -ForegroundColor Cyan
-& $iscc "packaging\DiaReader.iss"
+& $iscc "/DAppVersion=$version" "packaging\DiaReader.iss"
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
 
 Get-ChildItem "build\installer\*.exe" | ForEach-Object {

@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 log = logging.getLogger("diareader.cli")
 
 
-def _load_engine() -> TtsEngine:
+def _load_engine():
     settings = config.Settings.load()
     if not settings.hf_token:
         log.error(
@@ -41,11 +41,11 @@ def _load_engine() -> TtsEngine:
         )
         sys.exit(1)
     try:
-        loaded = load_model(settings)
+        engine = TtsEngine(load_model(settings))
     except CudaNotAvailableError as e:
         log.error(str(e))
         sys.exit(1)
-    return TtsEngine(loaded), settings
+    return engine, settings
 
 
 def _parse_chapters(spec: str | None) -> list[int] | None:

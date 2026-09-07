@@ -73,6 +73,25 @@ def _posix(path: str) -> str:
     return path.replace("\\", "/")
 
 
+def _triton_compiler_lookup():
+    """Triton's "which C compiler will I use" function, whatever it is called today.
+
+    It was ``get_cc`` when this file was written and is ``_find_compiler`` in triton
+    3.8. Missing the rename is not harmless: ``c_compiler()`` reported
+    "ImportError: cannot import name 'get_cc'" and the selftest turned that into
+    "torch.compile cannot run" on a machine where torch.compile demonstrably ran, and
+    ``ensure_c_compiler`` — the packaged-build path — would have raised AttributeError
+    reaching for the old name.
+    """
+    import triton.runtime.build as triton_build
+
+    for name in ("get_cc", "_find_compiler"):
+        found = getattr(triton_build, name, None)
+        if found is not None:
+            return found
+    return None
+
+
 def _bundled_torch_dir() -> str | None:
     """The prefix torch's *code objects* actually carry, or None if unbundled.
 
@@ -117,7 +136,8 @@ def ensure_c_compiler() -> str | None:
         return None
 
     os.environ["CC"] = str(tcc)
-    getattr(triton_build.get_cc, "cache_clear", lambda: None)()
+    lookup = _triton_compiler_lookup()
+    getattr(lookup, "cache_clear", lambda: None)()
     return str(tcc)
 
 
@@ -175,12 +195,21 @@ def use_bundled_python_headers() -> str | None:
 
 def c_compiler() -> tuple[bool, str]:
     """(found, description) — what inductor will shell out to on this machine."""
-    try:
-        from triton.runtime.build import get_cc
-
-        return True, get_cc()
-    except Exception as e:  # noqa: BLE001
-        return False, f"{type(e).__name__}: {e}"
+    lookup = _triton_compiler_lookup()
+    if lookup is None:
+        return False, "triton exposes no compiler lookup under any known name"
+    # get_cc() took nothing; _find_compiler(language) takes the language to compile.
+    # Inductor's kernel launchers are C, and asking for the wrong arity here is how
+    # this row came to report "torch.compile cannot run" on a machine where the row
+    # below says it is working.
+    for args in (("c",), ()):
+        try:
+            return True, str(lookup(*args))
+        except TypeError:
+            continue
+        except Exception as e:  # noqa: BLE001
+            return False, f"{type(e).__name__}: {e}"
+    return False, "triton's compiler lookup takes arguments this does not know"
 
 
 def probe(torch_module) -> tuple[bool, str]:

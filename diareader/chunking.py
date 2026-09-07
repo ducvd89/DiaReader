@@ -165,7 +165,13 @@ _TERMINAL_PUNCTUATION = ".!?…"
 
 
 def wrap_for_narration(chunk: str, tag: str = NARRATOR_TAG) -> str:
-    """Prepare a chunk for the model.
+    """Prepare a chunk for the model. Every call into an engine goes through here.
+
+    Including one-off experiments, which is not a style note. Hand-assembling
+    ``f"{NARRATOR_TAG} {text}"`` skips the terminal mark below, and a benchmark run
+    that way reported voice cloning as broken and generation as wildly unstable —
+    both artefacts of feeding the model exactly the malformed input this function
+    exists to prevent.
 
     A terminal mark is appended when missing: 99 of 100 sampled training transcripts
     end in one, and bare fragments (a stray heading line like "Quyển 2") are exactly
