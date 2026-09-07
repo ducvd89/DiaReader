@@ -622,7 +622,19 @@ def assemble(
                 else:
                     writer.write(audio_io.silence(INTER_CHUNK_SILENCE_S * gap_scale))
             take = cache.get(planned.chapter_index, planned.position)
-            if take is None or not cache.wav_path(take).exists():
+            # The key has to be checked, not just the presence of a take. Editing a
+            # chapter shifts every sentence after the edit into a new slot, and the
+            # take sitting in that slot then belongs to the sentence before it — so
+            # this wrote the wrong sentence into the book, silently, in the reader's
+            # own voice. A gap is recoverable; a plausible-sounding wrong sentence in
+            # a four-hour file is not. (SentenceCache.realign_to moves takes to follow
+            # their sentences, which is what stops this being reached in practice.)
+            usable = (
+                take is not None
+                and cache.matches(take, planned.text, planned.voice, speed or 1.0)
+                and cache.wav_path(take).exists()
+            )
+            if not usable:
                 missing += 1
                 log.warning(
                     "No audio cached for sentence %d of %r; leaving a gap.",

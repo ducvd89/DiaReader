@@ -270,6 +270,82 @@ class SentenceCache:
     def size_bytes(self) -> int:
         return dir_size(self.dir)
 
+    def realign_to(self, plan, speed: float) -> int:
+        """Move every take to the position its sentence now occupies.
+
+        Takes are stored under a position but identified by their content, and an edit
+        breaks the two apart: split one sentence in two and everything after it slides
+        down a slot. The text moved and the audio did not, so the review table showed
+        sentence N beside sentence N-1’s recording, the last sentence looked
+        unrendered while its audio sat one slot up, and every sentence after the edit
+        was regenerated at about forty seconds each.
+
+        Matching is by key — (text, voice, speed) — which is what the module docstring
+        has always claimed position is deliberately kept out of. This is where that
+        claim is actually honoured.
+
+        `plan` is (chapter index, position, text, voice) for the sentences the book now
+        has. Chapters absent from it are left alone, so realigning one chapter never
+        disturbs another. Returns how many takes moved.
+        """
+        by_chapter: dict[str, list[tuple[int, str, str | None]]] = {}
+        for chapter_index, position, text, voice in plan:
+            by_chapter.setdefault(str(chapter_index), []).append((position, text, voice))
+        moved = 0
+        for index, wanted in by_chapter.items():
+            chapter = self._chapters.get(index)
+            if chapter is not None:
+                moved += self._realign_chapter(chapter, sorted(wanted), speed)
+        if moved:
+            log.info("Sentences shifted in the script; moved %d cached take(s) to follow.",
+                     moved)
+            self.save()
+        return moved
+
+    def _realign_chapter(self, chapter: ChapterTakes, wanted, speed: float) -> int:
+        pool: dict[str, list[Take]] = {}
+        for take in chapter.sentences.values():
+            pool.setdefault(take.key, []).append(take)
+        for takes in chapter.alternatives.values():
+            for take in takes:
+                pool.setdefault(take.key, []).append(take)
+        # The take that was in use stays the one in use: an edit elsewhere in the
+        # chapter must not undo a take the user listened to and chose.
+        for takes in pool.values():
+            takes.sort(key=lambda t: not t.in_use)
+
+        sentences: dict = {}
+        first_slot: dict[str, str] = {}
+        moved = 0
+        for position, text, voice in wanted:
+            key = take_key(text, voice, speed)
+            slot = str(position)
+            first_slot.setdefault(key, slot)
+            candidates = pool.get(key)
+            if not candidates:
+                continue
+            take = candidates.pop(0)
+            if chapter.sentences.get(slot) is not take:
+                moved += 1
+            take.in_use = True
+            sentences[slot] = take
+
+        # Whatever is left over is a take nothing in the book is currently asking for:
+        # other renderings of a sentence that is still there, or the audio of a
+        # sentence that was just edited. Both are parked as alternatives rather than
+        # dropped, so undoing the edit finds them again instead of paying to remake
+        # them — and so no WAV is left on disk that the manifest cannot reach.
+        last_slot = str(wanted[-1][0]) if wanted else "0"
+        alternatives: dict = {}
+        for key, leftover in pool.items():
+            slot = first_slot.get(key, last_slot)
+            for take in leftover:
+                take.in_use = False
+                alternatives.setdefault(slot, []).append(take)
+
+        chapter.sentences, chapter.alternatives = sentences, alternatives
+        return moved
+
     def clear(self) -> None:
         """Forget everything for this book, files included."""
         self._chapters.clear()

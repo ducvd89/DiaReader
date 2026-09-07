@@ -151,3 +151,116 @@ def test_an_alternative_can_be_adopted_back(cache):
 
     assert cache.get(0, 0).wav == first.wav
     assert first.wav not in [t.wav for t in cache.alternatives_for(0, 0)]
+
+
+# --- takes follow their sentence when an edit shifts it -------------------------------
+#
+# Position is deliberately not part of a take's key, which the module docstring has
+# always said. Storage is by position all the same, so an edit pulls the two apart:
+# split one sentence in two and everything after it slides down a slot. realign_to is
+# where that claim is actually honoured.
+
+
+def _chapter(cache, texts):
+    for position, text in enumerate(texts):
+        _put(cache, position=position, text=text)
+
+
+def _keys(texts, voice="Vietsu"):
+    return [(0, position, text, voice) for position, text in enumerate(texts)]
+
+
+ORIGINAL = ["Câu một.", "Câu hai.", "Câu ba."]
+SPLIT = ["Câu một.", "Câu hai a.", "Câu hai b.", "Câu ba."]
+
+
+def test_a_take_follows_its_sentence_down_a_slot(cache):
+    """The bug as reported: split a sentence and the text below moves while the audio
+    stays put, so the table shows sentence N beside sentence N-1's recording."""
+    _chapter(cache, ORIGINAL)
+    cache.realign_to(_keys(SPLIT), 1.0)
+
+    assert cache.get(0, 3).text == "Câu ba."
+    assert cache.get(0, 0).text == "Câu một."
+
+
+def test_only_the_genuinely_new_sentences_are_missing(cache):
+    """Three of four were being regenerated when two were actually new, at about
+    forty seconds each."""
+    _chapter(cache, ORIGINAL)
+    cache.realign_to(_keys(SPLIT), 1.0)
+    assert cache.missing(_keys(SPLIT), 1.0) == [(0, 1), (0, 2)]
+
+
+def test_a_slot_whose_sentence_changed_is_left_empty_not_wrong(cache):
+    """Empty is recoverable. Holding the previous sentence's audio is what put the
+    wrong words into the finished book."""
+    _chapter(cache, ORIGINAL)
+    cache.realign_to(_keys(SPLIT), 1.0)
+    assert cache.get(0, 1) is None
+    assert cache.get(0, 2) is None
+
+
+def test_deleting_a_sentence_pulls_the_rest_back_up(cache):
+    _chapter(cache, ORIGINAL)
+    shorter = ["Câu một.", "Câu ba."]
+    cache.realign_to(_keys(shorter), 1.0)
+
+    assert [cache.get(0, p).text for p in range(2)] == shorter
+    assert cache.missing(_keys(shorter), 1.0) == []
+
+
+def test_an_untouched_chapter_does_not_move(cache):
+    _chapter(cache, ORIGINAL)
+    assert cache.realign_to(_keys(ORIGINAL), 1.0) == 0
+    assert [cache.get(0, p).text for p in range(3)] == ORIGINAL
+
+
+def test_the_adopted_take_stays_the_adopted_one(cache):
+    """An edit elsewhere in the chapter must not undo a take the user listened to and
+    chose."""
+    _chapter(cache, ORIGINAL)
+    chosen = _put(cache, position=2, text="Câu ba.", voice="Latradio")
+    cache.adopt(0, 2, chosen)
+
+    cache.realign_to(_keys(SPLIT, voice="Vietsu")
+                     [:3] + [(0, 3, "Câu ba.", "Latradio")], 1.0)
+    assert cache.get(0, 3).wav == chosen.wav
+    assert cache.get(0, 3).in_use
+
+
+def test_the_audio_of_an_edited_sentence_is_kept_not_dropped(cache):
+    """Undoing the edit has to find it again rather than pay to make it a second time
+    — and a WAV the manifest cannot reach would never be cleaned up either."""
+    _chapter(cache, ORIGINAL)
+    orphaned = cache.get(0, 1)
+    cache.realign_to(_keys(SPLIT), 1.0)
+
+    assert cache.wav_path(orphaned).is_file()
+    parked = [t.wav for takes in cache._chapters["0"].alternatives.values() for t in takes]
+    assert orphaned.wav in parked
+
+    # And undoing the edit puts it back to work.
+    cache.realign_to(_keys(ORIGINAL), 1.0)
+    assert cache.get(0, 1).wav == orphaned.wav
+    assert cache.missing(_keys(ORIGINAL), 1.0) == []
+
+
+def test_realigning_one_chapter_leaves_the_others_alone(cache):
+    _chapter(cache, ORIGINAL)
+    cache.put(1, 0, _audio(), title="Ch2", text="Chương sau.", voice="Vietsu", speed=1.0)
+
+    cache.realign_to(_keys(SPLIT), 1.0)
+    assert cache.get(1, 0).text == "Chương sau."
+
+
+def test_two_identical_sentences_each_keep_a_take(cache):
+    """Same text twice in a chapter means two takes sharing one key; matching them
+    off one at a time is what keeps both slots filled."""
+    twice = ["Vâng ạ.", "Câu giữa.", "Vâng ạ."]
+    _chapter(cache, twice)
+    moved_to = ["Mở đầu.", "Vâng ạ.", "Câu giữa.", "Vâng ạ."]
+    cache.realign_to(_keys(moved_to), 1.0)
+
+    assert [cache.get(0, p) is not None for p in range(4)] == [False, True, True, True]
+    assert cache.missing(_keys(moved_to), 1.0) == [(0, 0)]

@@ -691,9 +691,9 @@ class MainWindow(QMainWindow):
         plan = pipeline.sentence_plan(self.chapters, self.settings)
         cache = self._sentence_cache()
         speed = self.settings.speed
-        gaps = set(cache.missing(
-            [(p.chapter_index, p.position, p.text, p.voice) for p in plan], speed
-        ))
+        keys = [(p.chapter_index, p.position, p.text, p.voice) for p in plan]
+        cache.realign_to(keys, speed)
+        gaps = set(cache.missing(keys, speed))
         counts: dict[int, int] = {}
         for planned in plan:
             if (planned.chapter_index, planned.position) not in gaps:
@@ -720,9 +720,12 @@ class MainWindow(QMainWindow):
         )
         cache = self._sentence_cache()
         speed = request.speed if request.speed is not None else self.settings.speed
-        gaps = set(cache.missing(
-            [(p.chapter_index, p.position, p.text, p.voice) for p in plan], speed
-        ))
+        keys = [(p.chapter_index, p.position, p.text, p.voice) for p in plan]
+        # Before asking what is missing: an edit slides every later sentence into a new
+        # slot, and a take that only looks missing because it is one slot up costs
+        # about forty seconds to make again.
+        cache.realign_to(keys, speed)
+        gaps = set(cache.missing(keys, speed))
         todo = [p for p in plan if (p.chapter_index, p.position) in gaps]
         destination = (request.out_path or "").strip()
 
@@ -835,9 +838,17 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Realign first, or the table shows each sentence beside the recording of the
+        # one before it for everything after an edit.
+        cache = self._sentence_cache()
+        cache.realign_to(
+            [(p.chapter_index, p.position, p.text, p.voice) for p in plan],
+            self.settings.speed,
+        )
+
         # Parentless for the same reason the editor is: this table is worked through
         # for as long as re-rendering takes, and the log has to stay reachable.
-        dialog = SentenceReviewDialog(plan, self._sentence_cache(), self.settings, None)
+        dialog = SentenceReviewDialog(plan, cache, self.settings, None)
         dialog.setWindowTitle(f"Sentences — {self.chapters[index].title}")
         self._review_chapter = index
         dialog.render_requested.connect(self._render_from_review)

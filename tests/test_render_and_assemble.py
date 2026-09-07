@@ -210,3 +210,52 @@ def test_no_voices_configured_still_plans(settings):
     without audio prompts."""
     plan = pipeline.sentence_plan(CHAPTERS, settings)
     assert [p.voice for p in plan] == [None] * 3
+
+
+# --- assembling refuses audio that is not this sentence's ----------------------------
+
+
+def test_assembling_leaves_a_gap_rather_than_the_wrong_sentence(cache, settings, tmp_path):
+    """A take was written into the book on the strength of sitting in the right slot,
+    with nothing checking that it said the right words. After an edit shifts the
+    sentences that is the *previous* sentence, read out in the reader's own voice in
+    the middle of their book. A gap is recoverable; a plausible wrong sentence in a
+    four-hour file is not."""
+    original = [text_extract.Chapter(title="Ch1", text="Câu một dài. Câu hai dài.")]
+    pipeline.render_sentences(
+        FakeEngine(), settings, cache,
+        pipeline.sentence_plan(original, settings), speed=1.0
+    )
+
+    edited = [text_extract.Chapter(title="Ch1", text="Câu một dài. Câu chen vào. Câu hai dài.")]
+    plan = pipeline.sentence_plan(edited, settings)
+    # Deliberately not realigned: this is the last line of defence, so it is tested
+    # with the cache in exactly the state realign_to exists to prevent.
+    result = pipeline.assemble(cache, plan, tmp_path / "book.wav", speed=1.0)
+
+    audio, rate = sf.read(str(result), dtype="float32")
+    # One second of real audio, two short gaps, and the two inter-sentence silences.
+    expected = 1 + 2 * 0.2 + 2 * pipeline.INTER_CHUNK_SILENCE_S
+    assert abs(len(audio) / rate - expected) < 0.05
+
+
+def test_realigning_first_puts_the_shifted_sentence_back_in_the_file(cache, settings,
+                                                                     tmp_path):
+    original = [text_extract.Chapter(title="Ch1", text="Câu một dài. Câu hai dài.")]
+    pipeline.render_sentences(
+        FakeEngine(), settings, cache,
+        pipeline.sentence_plan(original, settings), speed=1.0
+    )
+
+    edited = [text_extract.Chapter(title="Ch1", text="Câu một dài. Câu chen vào. Câu hai dài.")]
+    plan = pipeline.sentence_plan(edited, settings)
+    cache.realign_to(
+        [(p.chapter_index, p.position, p.text, p.voice) for p in plan], 1.0
+    )
+    assert cache.get(0, 2).text == "Câu hai dài."
+
+    result = pipeline.assemble(cache, plan, tmp_path / "book.wav", speed=1.0)
+    audio, rate = sf.read(str(result), dtype="float32")
+    # Both original sentences survive; only the inserted one is a gap.
+    expected = 2 + 0.2 + 2 * pipeline.INTER_CHUNK_SILENCE_S
+    assert abs(len(audio) / rate - expected) < 0.05
