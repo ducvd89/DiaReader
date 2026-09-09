@@ -12,6 +12,6 @@ from . import ffmpeg_dlls as _ffmpeg_dlls
 #: The one place the version is written. packaging/build.ps1 reads it from here and
 #: passes it to Inno Setup, so the installer filename and the app can never disagree
 #: — which they would the first time someone bumped one and forgot the other.
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 _ffmpeg_dlls.register()
