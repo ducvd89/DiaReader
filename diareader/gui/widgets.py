@@ -155,7 +155,7 @@ class PlayerControls(QWidget):
             "listen to the result, and keep it or leave the old one."
         )
         self.stop_button = QPushButton("Stop")
-        self.export_button = QPushButton("Save final file…")
+        self.export_button = QPushButton("Export audio file…")
         self.export_button.setToolTip(
             "Assemble the cached sentences into a WAV or MP3. Anything not rendered "
             "yet is generated first."

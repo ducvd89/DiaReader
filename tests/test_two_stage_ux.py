@@ -1,7 +1,7 @@
 """The two halves of making an audiobook, and the seam the user sees.
 
 Rendering and saving used to be one button with one file dialog in front of it. They
-are separate jobs now — the script editor fills the cache, Save final file writes the
+are separate jobs now — the script editor fills the cache, Export audio file writes the
 file — and what has to hold is that neither half quietly does the other's work, and
 that a choice made in one half is still true in the other.
 """
@@ -74,7 +74,7 @@ class _FakeWindow:
 
 def test_a_non_default_opening_voice_is_written_into_the_script(settings):
     """Held only in the combo, it would be lost the moment the editor closed — and
-    Save final file no longer asks for a voice, so nothing downstream could recover it."""
+    Export audio file no longer asks for a voice, so nothing downstream could recover it."""
     text = _with_marker(_FakeWindow(settings), "Câu một dài vừa đủ.", "NuMN1")
     assert text.startswith("[NuMN1] ")
 

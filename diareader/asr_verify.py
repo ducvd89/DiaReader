@@ -45,15 +45,30 @@ log = logging.getLogger(__name__)
 MODEL_REPO = "nguyenvulebinh/wav2vec2-base-vietnamese-250h"
 ASR_SAMPLE_RATE = 16000
 
-# Tighter than the 0.85-1.20 the peak counter needed, and it is the instrument that
-# earns it:
-# on the seventeen human reference clips this counter reads mean 1.000 with 2.8%
-# spread, so 0.90 and 1.10 sit 3.6 standard deviations out and admit all seventeen.
-# 0.95-1.05 was measured too: it rejects two of them (0.926 and 1.074, both ASR slips
-# on real speech), which is the ~12% false-alarm rate this whole change existed to
-# remove. Meanwhile the worst truncated generation measured 0.60, so the margin below
-# is 0.30 wide — with peak counting there was no margin at all.
-RATIO_MIN = 0.90
+# The floor is exact: a sentence must not come back short of a single syllable.
+#
+# It was 0.90, and that was calibrated on the seventeen human reference clips, where
+# this counter reads mean 1.000 with 2.8% spread. Generated speech turned out to be an
+# easier subject than real speech, so the margin that fits one is slack in the other.
+# Measured over 183 accepted takes with no foreign words in them, 174 scored exactly
+# 1.00; of the nine that did not, every single one was a defect — five where the model
+# genuinely dropped a word (confirmed by CTC alignment: the clip begins at the second
+# word with silence before it) and four where it leaked the tail of the voice prompt's
+# transcript into the sentence.
+#
+# A ratio floor was also the wrong shape for this. One missing syllable costs 0.20 on
+# a five-syllable sentence and 0.024 on a forty-one-syllable one, so it was harsh
+# exactly where a single recogniser slip dominates and blind exactly where a dropped
+# word hides: the worst of the five, a whole word missing from a 41-syllable sentence,
+# scored 0.976 and would clear any ratio floor anyone would dare set.
+FLOOR_MISSING_SYLLABLES = 0
+
+# The ceiling stays proportional and stays generous, which is deliberate rather than
+# an oversight now that the floor is exact. Hearing *more* than the text says is the
+# ambiguous direction: an unusually long foreign word, or a digit string read the
+# longer of its two correct ways, both land here and neither is a fault in the audio.
+# A false rejection costs ten regenerations at about forty seconds each, so the side
+# with honest ambiguity on it is the side that keeps its margin.
 RATIO_MAX = 1.10
 
 # Below this a clip is a failed generation rather than something to transcribe: the
@@ -150,11 +165,19 @@ class AsrCounter:
 
         # A foreign word is one token and several spoken syllables — "SmartBanking"
         # counts as one and is read as four — so the ceiling, and only the ceiling,
-        # makes room for it. The error runs one way: the text under-counts what will
-        # be said, never over-counts, so the floor stays exactly where it was.
+        # makes room for it. That error runs one way: the text under-counts what will
+        # be said, never over-counts.
         extra = foreign_words.extra_syllables_allowed(source_text)
+
+        # No allowance for numbers here, deliberately. A number of four digits or
+        # fewer is read properly and counts properly; one of five or more is flagged
+        # in the script and the reader is asked to write it out in words before
+        # rendering, because the model reads those wrong however they are counted.
+        # Slack in the checker would only hide that, and it is not the checker's
+        # problem to solve — see vn_numbers.hard_to_read.
+        floor = expected - FLOOR_MISSING_SYLLABLES
         ceiling = expected * RATIO_MAX + extra
-        ok = expected * RATIO_MIN <= heard <= ceiling
+        ok = floor <= heard <= ceiling
 
         # The transcript is the point of the detail line: "36% of the sounds" says a
         # sentence is wrong, "heard 'dạ em chào'" says how.

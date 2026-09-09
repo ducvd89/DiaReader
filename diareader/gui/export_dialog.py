@@ -1,4 +1,4 @@
-"""Save final file: where to write it, and which of the rendered chapters go in.
+"""Export audio file: where to write it, and which of the rendered chapters go in.
 
 Nothing is generated here. By the time this opens, the audio already exists — it was
 made sentence by sentence from the script editor and lives in the cache — so the only
@@ -18,7 +18,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+    QVBoxLayout, QWidget
 )
 
 from .. import config
@@ -48,7 +49,7 @@ class ExportDialog(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Save final file")
+        self.setWindowTitle("Export audio file")
         self.setMinimumWidth(620)
 
         self.settings = settings
@@ -105,6 +106,7 @@ class ExportDialog(QDialog):
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setText("Export")
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
 
@@ -114,7 +116,7 @@ class ExportDialog(QDialog):
                 "No chapter has been rendered yet, so there is nothing to save.\n\n"
                 "Open a chapter in the script editor and press “Render this script”. "
                 "The sentences are generated into the cache, and this is where they "
-                "become a file."
+                "become an audio file."
             )
             empty.setWordWrap(True)
             layout.addWidget(empty)
@@ -153,9 +155,29 @@ class ExportDialog(QDialog):
         if ok is not None:
             ok.setEnabled(bool(indices) and bool(self.path_edit.text().strip()))
 
+    def accept(self) -> None:
+        """Refuse to overwrite silently, however the path arrived.
+
+        QFileDialog asks on its own, but only for a path chosen through it — one typed
+        into the box beside it reaches here unchallenged, and an export can be hours of
+        work landing on hours of work.
+        """
+        destination = Path(self.path_edit.text().strip())
+        if destination.exists():
+            answer = QMessageBox.question(
+                self, "File already exists",
+                f"{destination.name} is already in {destination.parent}.\n\n"
+                "Replace it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        super().accept()
+
     def _browse(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save final file", self.path_edit.text() or "", "MP3 (*.mp3);;WAV (*.wav)"
+            self, "Export audio file", self.path_edit.text() or "", "MP3 (*.mp3);;WAV (*.wav)"
         )
         if path:
             self.path_edit.setText(path)

@@ -122,7 +122,7 @@ forty seconds a sentence, and before the split an interrupted export lost all of
    are red. Tick the bad ones, pick a different voice if that helps, and render again —
    each attempt is kept, so you can compare takes and adopt whichever one is right.
 
-3. **Save.** **Save final file…** asks only where to put it and which of the rendered
+3. **Export.** **Export audio file…** asks only where to put it and which of the rendered
    chapters to include. It does not ask for a voice or a speed: the voice is what the
    script's markers say, and the speed is already baked into each cached take, so
    offering either here could only contradict what was rendered.

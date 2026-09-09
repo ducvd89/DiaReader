@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 )
 
-from .. import chunking, config, voice
+from .. import chunking, config, vn_numbers, voice
 from .flow_layout import wrapping_row
 
 log = logging.getLogger(__name__)
@@ -154,6 +154,14 @@ _NONVERBAL_RE = chunking.NONVERBAL_RE
 _NONVERBAL_BG = "#ffffff"
 _NONVERBAL_INK = "#000000"
 
+# A number the model will read wrong. Amber, the same warning colour the log panel
+# uses, and deliberately not the palette's red: red means "this voice does not exist",
+# which is broken, and this is not broken — the script just needs a word instead of a
+# figure. Measured on this model: 1000000 comes back "một ngàn", 1500000000 comes back
+# "một một năm ngàn". It has no scale words at all.
+_HARD_NUMBER_BG = "#4a3a12"
+_HARD_NUMBER_INK = "#ffcc55"
+
 
 class MarkerHighlighter(QSyntaxHighlighter):
     """Paints [Voice] markers in that voice's colour, flags unknown ones, and marks
@@ -242,6 +250,23 @@ class MarkerHighlighter(QSyntaxHighlighter):
             fmt.setForeground(QColor(_NONVERBAL_INK))
             fmt.setFontItalic(True)
             fmt.setToolTip("Non-verbal direction — performed, not spoken.")
+            self.setFormat(match.start(), match.end() - match.start(), fmt)
+
+        for match in vn_numbers.NUMBER_RE.finditer(text):
+            if not vn_numbers.is_hard_to_read(match.group()):
+                continue
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor(_HARD_NUMBER_BG))
+            fmt.setForeground(QColor(_HARD_NUMBER_INK))
+            # Underlined as well as coloured, for the same reason an unknown marker
+            # is: this has to survive being read by someone who cannot separate the
+            # two warm colours in this palette.
+            fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.DotLine)
+            fmt.setUnderlineColor(QColor(_HARD_NUMBER_INK))
+            fmt.setToolTip(
+                "The model reads numbers this long wrong — 1000000 comes out "
+                "\"một ngàn\". Write it in words and it will say exactly that."
+            )
             self.setFormat(match.start(), match.end() - match.start(), fmt)
 
 
@@ -517,7 +542,7 @@ class ScriptEditorDialog(QDialog):
         self.export_button.setToolTip(
             "Generate every sentence of this chapter into the cache. No file is "
             "written here — the audio is kept per sentence so a bad one can be "
-            "redone on its own, and “Save final file” builds the MP3 from "
+            "redone on its own, and “Export audio file” builds the MP3 from "
             "whatever is in the cache when you ask for it."
         )
         self.save_button.clicked.connect(self._save_without_closing)

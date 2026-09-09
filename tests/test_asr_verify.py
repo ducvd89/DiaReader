@@ -27,10 +27,14 @@ def _audio(seconds=1.0):
     return np.ones(int(seconds * config.SAMPLE_RATE), dtype=np.float32)
 
 
-def test_the_band_is_the_measured_one():
-    """0.95-1.05 was tried and rejects two of the seventeen human reference clips;
-    0.90-1.10 admits all of them and still sits 0.30 clear of the worst truncation."""
-    assert (asr_verify.RATIO_MIN, asr_verify.RATIO_MAX) == (0.90, 1.10)
+def test_the_floor_is_exact_and_the_ceiling_is_not():
+    """Measured over 183 accepted takes with no foreign words: 174 scored exactly
+    1.00, and all nine that did not were defects. Hearing *fewer* syllables than the
+    text has is unambiguous, so the floor is exact; hearing more can be an unusually
+    long foreign word or a digit string read the longer of its two correct ways, so
+    the ceiling keeps its margin."""
+    assert asr_verify.FLOOR_MISSING_SYLLABLES == 0
+    assert asr_verify.RATIO_MAX == 1.10
 
 
 def test_a_sentence_read_in_full_is_accepted(counter):
@@ -149,3 +153,68 @@ def test_release_drops_the_model():
     checker._processor = object()
     checker.release()
     assert checker._model is None and checker._processor is None
+
+
+# --- the exact floor, and the two things allowed to bend it --------------------------
+
+
+def test_a_sentence_one_syllable_short_is_rejected(counter):
+    """The floor was 0.90 and let four of these into a finished book: confirmed by
+    CTC alignment as the model genuinely dropping the first word, the clip beginning
+    at the second with silence in front of it."""
+    counter.heard = "nhất anh được hưởng"
+    ok, _, _ = counter.check("Thứ nhất, anh được hưởng", _audio())
+    assert not ok
+
+
+def test_a_long_sentence_cannot_hide_a_dropped_word(counter):
+    """The case a ratio floor structurally could not see: one word missing from a
+    41-syllable sentence scores 0.976 and clears any ratio anyone would dare set."""
+    text = " ".join(["câu"] * 41)
+    counter.heard = " ".join(["câu"] * 40)
+    ok, score, _ = counter.check(text, _audio())
+    assert score > 0.97
+    assert not ok
+
+
+def test_hearing_every_syllable_is_accepted(counter):
+    counter.heard = "dạ em chào anh minh"
+    ok, _, _ = counter.check("Dạ, em chào anh Minh", _audio())
+    assert ok
+
+
+def test_the_ceiling_keeps_its_margin(counter):
+    """Hearing more than the text says is the ambiguous direction, so it is the one
+    that keeps room: a false rejection costs ten regenerations at ~40s each."""
+    text = " ".join(["câu"] * 20)          # ceiling is 20 * 1.10 = 22
+    counter.heard = " ".join(["câu"] * 22)
+    assert counter.check(text, _audio())[0]
+
+
+def test_the_ceiling_is_not_unlimited(counter):
+    """It is a margin for ambiguity, not an amnesty. The model repeating itself, or
+    leaking the voice prompt's transcript into the sentence, has to still be caught."""
+    text = " ".join(["câu"] * 20)
+    counter.heard = " ".join(["câu"] * 23)
+    assert not counter.check(text, _audio())[0]
+
+
+def test_a_long_number_read_digit_by_digit_is_accepted(counter):
+    """Counted one syllable per digit, which is what the reader was warned about and
+    chose to render anyway."""
+    counter.heard = "anh gọi số một chín không không một hai ba bốn nhé"
+    ok, _, _ = counter.check("Anh gọi số 19001234 nhé.", _audio())
+    assert ok
+
+
+def test_a_short_number_is_counted_as_it_is_said(counter):
+    counter.heard = "năm hai nghìn không trăm hai mươi sáu"
+    ok, _, _ = counter.check("Năm 2026", _audio())
+    assert ok
+
+
+def test_the_checker_gives_numbers_no_allowance_of_its_own(counter):
+    """Slack here would only hide the thing the script warning exists to fix."""
+    counter.heard = "gọi một ngàn"          # what the model actually says for 1000000
+    ok, _, _ = counter.check("Gọi 1000000", _audio())
+    assert not ok

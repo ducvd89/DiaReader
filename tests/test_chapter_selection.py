@@ -171,3 +171,60 @@ def test_it_does_not_ask_for_a_voice_or_a_speed(qt_app):
     dlg = _dialog(qt_app)
     assert not hasattr(dlg, "voice_combo")
     assert not hasattr(dlg, "speed_combo")
+
+
+# --- not overwriting a finished export by accident -----------------------------------
+
+
+def _accept(dlg, answer, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    seen = {}
+
+    def question(_self, title, message, *args, **kwargs):
+        seen["title"], seen["message"] = title, message
+        return answer
+
+    monkeypatch.setattr("diareader.gui.export_dialog.QMessageBox.question", question)
+    dlg.accept()
+    return seen
+
+
+def test_a_new_filename_is_not_questioned(qt_app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    dlg = _dialog(qt_app)
+    dlg.path_edit.setText(str(tmp_path / "book.mp3"))
+    seen = _accept(dlg, QMessageBox.StandardButton.No, monkeypatch)
+    assert seen == {}
+    assert dlg.result() == dlg.DialogCode.Accepted
+
+
+def test_an_existing_file_has_to_be_confirmed(qt_app, tmp_path, monkeypatch):
+    """QFileDialog asks on its own, but only about a path chosen through it. One typed
+    into the box beside it used to reach the writer unchallenged — and an export can
+    be hours of work landing on hours of work."""
+    from PySide6.QtWidgets import QMessageBox
+
+    existing = tmp_path / "book.mp3"
+    existing.write_bytes(b"the previous export")
+
+    dlg = _dialog(qt_app)
+    dlg.path_edit.setText(str(existing))
+    seen = _accept(dlg, QMessageBox.StandardButton.No, monkeypatch)
+
+    assert "book.mp3" in seen["message"]
+    assert dlg.result() != dlg.DialogCode.Accepted
+    assert existing.read_bytes() == b"the previous export"
+
+
+def test_saying_replace_goes_ahead(qt_app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    existing = tmp_path / "book.mp3"
+    existing.write_bytes(b"the previous export")
+
+    dlg = _dialog(qt_app)
+    dlg.path_edit.setText(str(existing))
+    _accept(dlg, QMessageBox.StandardButton.Yes, monkeypatch)
+    assert dlg.result() == dlg.DialogCode.Accepted

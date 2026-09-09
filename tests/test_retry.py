@@ -56,7 +56,7 @@ class _Verifier:
         expected = len(verify.syllables(text))
         heard = _encoded_count(audio)
         score = heard / expected
-        ok = asr_verify.RATIO_MIN <= score <= asr_verify.RATIO_MAX
+        ok = expected <= heard <= expected * asr_verify.RATIO_MAX
         return ok, score, f"{heard} of {expected} syllables"
 
 
@@ -74,7 +74,7 @@ def test_there_is_no_early_exit_left():
 
 def test_a_stable_score_just_under_the_bar_also_runs_the_full_budget():
     """The band the old rule fired in. Nothing special happens there any more."""
-    near = _syllables_scoring(0.55, asr_verify.RATIO_MIN)
+    near = _syllables_scoring(0.55, 0.90)
     engine = ScriptedEngine([near] * 12)
     pipeline._generate_chunk(engine, SENTENCE, None, "Ch. 1", 0, verifier=_Verifier())
     assert engine.calls == pipeline._MAX_ATTEMPTS

@@ -13,7 +13,9 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel
 )
 
-from .. import chunking, config, naming, pipeline, sentence_cache, text_extract, voice
+from .. import (
+    chunking, config, naming, pipeline, sentence_cache, text_extract, vn_numbers, voice
+)
 from ..model_loader import CudaNotAvailableError, free_vram, require_cuda
 from .export_dialog import ExportDialog
 from .script_editor import ScriptEditorDialog
@@ -515,12 +517,14 @@ class MainWindow(QMainWindow):
 
         # The opening voice becomes a marker in the script rather than a setting that
         # travels alongside it. Casting belongs to the script — that is the whole
-        # reason Save final file no longer asks for a voice — and a choice held only
+        # reason Export audio file no longer asks for a voice — and a choice held only
         # in this combo would be lost the moment the editor closed, leaving the
         # chapter to be re-rendered in whatever the default happened to be.
         text = self._with_opening_marker(text, dialog.start_voice())
         self._save_chapter_edit(index, text)
 
+        if not self._confirm_hard_numbers(text):
+            return
         if not self._confirm_cache_room(text):
             return
 
@@ -533,7 +537,7 @@ class MainWindow(QMainWindow):
         self._ensure_engine(
             lambda: self._start_export(
                 SimpleNamespace(
-                    out_path="",          # cache only; Save final file writes the file
+                    out_path="",          # cache only; Export audio file writes the file
                     chapter_indices=[index],
                     start_voice=None,     # the script says who reads what
                     speed=getattr(self.settings, "speed", 1.0),
@@ -554,6 +558,36 @@ class MainWindow(QMainWindow):
             return text
         log.info("Writing the opening voice [%s] into the script.", start_voice)
         return f"[{start_voice}] {text}"
+
+    def _confirm_hard_numbers(self, text: str) -> bool:
+        """Stop before rendering a chapter whose numbers the model cannot say.
+
+        Measured on this model: 1000000 comes back "một ngàn" and 1500000000 comes
+        back "một một năm ngàn" — it has no scale words, so a figure of five digits or
+        more is read wrong however the checker counts it. Written out in words it is
+        read perfectly, and that is a change only the person with the script can make.
+
+        Asked here rather than warned about afterwards, because afterwards is twenty
+        minutes of GPU time and a chapter that has to be redone.
+        """
+        numbers = vn_numbers.hard_to_read(text)
+        if not numbers:
+            return True
+        shown = ", ".join(dict.fromkeys(numbers))
+        if len(shown) > 200:
+            shown = shown[:197] + "…"
+        answer = QMessageBox.question(
+            self, "Numbers this model reads badly",
+            f"This chapter still has {len(numbers)} number(s) the model will not "
+            f"say correctly:\n\n{shown}\n\n"
+            "They are highlighted in the editor. Written out in words \u2014 "
+            "\u201cm\u1ed9t tri\u1ec7u\u201d rather than \u201c1000000\u201d \u2014 "
+            "the model reads them exactly right.\n\n"
+            "Render anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _confirm_cache_room(self, text: str) -> bool:
         """Warn before a chapter that will not fit under the cache limit.
@@ -710,7 +744,7 @@ class MainWindow(QMainWindow):
 
         The two stages are also separately reachable, and that is the shape of the app
         now: the script editor runs the first (`request.out_path` empty, audio into the
-        cache) and Save final file runs the second.
+        cache) and Export audio file runs the second.
         """
         chapters = chapters if chapters is not None else self.chapters
         plan = pipeline.sentence_plan(

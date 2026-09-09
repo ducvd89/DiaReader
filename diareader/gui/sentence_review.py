@@ -197,7 +197,7 @@ class CacheSettingsDialog(QDialog):
 
     def _clear_book(self) -> None:
         if not self._confirm(
-            "Delete every rendered sentence for this book?\n\nSaving the final file "
+            "Delete every rendered sentence for this book?\n\nExporting the audio "
             "afterwards will generate the whole selection again."
         ):
             return
@@ -506,7 +506,7 @@ class SentenceReviewDialog(QDialog):
         """Which rendering of this sentence goes into the file.
 
         Only shown once there is a choice to make. Picking one adopts it immediately —
-        the file is not written until "Save final file", so there is nothing to undo
+        the file is not written until "Export audio file", so there is nothing to undo
         and a confirmation step would only be in the way.
         """
         planned = self.plan[row]

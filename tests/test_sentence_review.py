@@ -1,7 +1,7 @@
 """The review table: picking sentences, choosing between takes, and what it does not do.
 
 What it must never do is change the book. Ticking, listening and adopting all act on
-the cache; the file is written later, by Save final file, from whatever is in use then.
+the cache; the file is written later, by Export audio file, from whatever is in use.
 """
 import numpy as np
 import pytest
@@ -155,7 +155,7 @@ def test_picking_an_earlier_take_adopts_it(qt_app, cache, settings):
 
 def test_the_dialog_never_touches_the_book(qt_app, cache, settings):
     """Adopting changes which take is in use and nothing else — no file is written
-    until Save final file."""
+    until Export audio file."""
     plan = _plan(settings)
     before = [p.text for p in plan]
     _store(cache, plan, 0, voice="Vietsu")
