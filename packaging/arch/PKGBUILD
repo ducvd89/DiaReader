@@ -1,0 +1,90 @@
+# Builds from the checkout this file sits in, the way packaging/build.ps1 does on
+# Windows: `cd packaging/arch && makepkg -si`.
+#
+# The Python side is a self-contained venv under /opt/diareader rather than Arch's
+# python-* packages. The model needs a specific pre-refactor Dia commit, CUDA 13
+# PyTorch for sm_120, and a torchcodec built against that exact torch. The repos and
+# the AUR cannot hold that combination together, and getting it wrong does not fail
+# loudly. The README notes cover the silent-failure modes.
+#
+# Rebuild after a Python minor upgrade (3.14 -> 3.15): the venv is tied to the
+# interpreter it was made with, the same as every other python-* package.
+
+pkgname=diareader
+pkgver=1.2.2
+pkgrel=2
+pkgdesc="Turn .txt/.epub books into Vietnamese audiobooks with Dia or VieNeu TTS"
+arch=('x86_64')
+url="https://github.com/ducvd89/DiaReader"
+license=('unknown')  # the repository carries no license; the model is CC-BY-NC-SA-4.0
+depends=(
+  'python>=3.14' 'python<3.15'
+  'nvidia-utils'   # libcuda; the CUDA runtime itself ships in the torch wheels
+  'ffmpeg'         # torchcodec decodes voice reference audio through it
+  'gcc'            # torch.compile builds a C launcher per kernel at run time
+  # What PySide6's bundled Qt links against but does not bundle (ldd of its
+  # xcb/wayland platform plugins, QtGui and QtMultimedia).
+  'dbus' 'fontconfig' 'freetype2' 'libglvnd' 'libpulse' 'libxkbcommon-x11'
+  'wayland' 'xcb-util-cursor' 'xcb-util-image' 'xcb-util-keysyms'
+  'xcb-util-renderutil' 'xcb-util-wm'
+)
+makedepends=('git')
+# Stripping the CUDA libraries in the torch/nvidia wheels breaks some and takes
+# ages on the rest; there is nothing of ours to strip.
+options=('!strip' '!debug')
+# ~7 GB, almost all of it already-compressed CUDA kernels; compressing it again
+# costs minutes and saves little.
+PKGEXT='.pkg.tar'
+
+_repo="$(realpath "$startdir/../..")"
+
+prepare() {
+  # Version is written once, in diareader/__init__.py; refuse to package a mismatch.
+  local version
+  version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$_repo/diareader/__init__.py")
+  if [[ "$version" != "$pkgver" ]]; then
+    error "pkgver=$pkgver but diareader/__init__.py says $version"
+    return 1
+  fi
+
+  rm -rf "$srcdir/app"
+  mkdir -p "$srcdir/app/packaging"
+  cp -r "$_repo/main.py" "$_repo/diareader" "$_repo/requirements.txt" \
+    "$_repo/requirements-vieneu.txt" "$srcdir/app/"
+  cp -r "$_repo/packaging/assets" "$_repo/packaging/linux" "$srcdir/app/packaging/"
+  find "$srcdir/app" -name __pycache__ -type d -prune -exec rm -rf {} +
+}
+
+package() {
+  local opt="$pkgdir/opt/$pkgname"
+  install -d "$opt"
+  cp -r "$srcdir/app" "$opt/app"
+
+  python -m venv "$opt/venv"
+  "$srcdir/app/packaging/linux/install_deps.sh" "$opt/venv/bin/python"
+
+  # The app is not pip-installed, so put its folder on the venv's path. That makes
+  # `python -m diareader.cli` work from anywhere, not just from inside the folder.
+  local site
+  site=$("$opt/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+  echo "/opt/$pkgname/app" > "$site/diareader_app.pth"
+
+  # Drop what only the build needed: pip itself, and pip's bytecode, which records
+  # $pkgdir paths. Recompile so nothing has to be written under /opt at run time.
+  "$opt/venv/bin/python" -m pip uninstall -y -q pip
+  find "$opt" -name __pycache__ -type d -prune -exec rm -rf {} +
+  "$opt/venv/bin/python" -m compileall -q -j0 -s "$pkgdir" -p / "$opt" || true
+  # Python 3.14's venv adds a joke "𝜋thon" symlink, which bsdtar cannot encode
+  # outside a UTF-8 locale.
+  rm -f "$opt/venv/bin/"$'\U0001d70b'"thon"
+  # Entry-point shebangs and pyvenv.cfg also name the build directory.
+  grep -rlI --null "$pkgdir" "$opt/venv/bin" "$opt/venv/pyvenv.cfg" \
+    | xargs -0r sed -i "s|$pkgdir||g"
+
+  install -Dm755 "$startdir/diareader.sh" "$pkgdir/usr/bin/diareader"
+  install -Dm755 "$startdir/diareader-cli.sh" "$pkgdir/usr/bin/diareader-cli"
+  install -Dm644 "$startdir/diareader.desktop" "$pkgdir/usr/share/applications/diareader.desktop"
+  install -Dm644 "$_repo/packaging/assets/icon_preview.png" \
+    "$pkgdir/usr/share/icons/hicolor/1024x1024/apps/diareader.png"
+  install -Dm644 "$_repo/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

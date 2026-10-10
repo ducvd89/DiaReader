@@ -30,6 +30,7 @@ for package in (
     "torch", "torchaudio", "torchcodec", "triton",
     "dia", "dac", "audiotools", "tensorboard",
     "numba", "llvmlite", "soundfile", "pyloudnorm", "scipy",
+    "vieneu", "sea_g2p", "onnxruntime", "soxr", "kaldi_native_fbank",
 ):
     try:
         d, b, h = collect_all(package)

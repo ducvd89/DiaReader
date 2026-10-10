@@ -20,3 +20,8 @@ venv/
 /build/
 /dist/
 *.egg-info/
+
+# makepkg output (packaging/arch).
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/*.pkg.tar*

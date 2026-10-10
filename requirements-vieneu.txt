@@ -1,0 +1,4 @@
+# Install after requirements.txt. ONNX Runtime's protobuf requirement conflicts with
+# descript-audiotools' old declared pin, though Dia's codec works with the newer
+# protobuf (verified by loading and generating with both engines).
+vieneu==3.8.3

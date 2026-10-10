@@ -266,6 +266,21 @@ def test_insert_marker_puts_a_usable_tag_in_the_text(qt_app):
     assert chunking.VOICE_MARKER.search(text)
 
 
+def test_vieneu_script_picker_inserts_selected_preset(qt_app):
+    from diareader.gui.script_editor import ScriptEditorDialog
+    from diareader.vieneu_presets import marker_for_name, presets
+
+    dlg = ScriptEditorDialog(
+        config.Settings(tts_engine="vieneu"), "Chương 1", "Xin chào."
+    )
+    assert dlg.voice_picker.count() == len(presets())
+    index = dlg.voice_picker.findData(marker_for_name("Mai Anh"))
+    assert index >= 0
+    dlg.voice_picker.setCurrentIndex(index)
+    dlg.insert_voice_button.click()
+    assert f"[{marker_for_name('Mai Anh')}]" in dlg.editor.toPlainText()
+
+
 def test_edited_text_drives_the_voices(qt_app):
     """The whole point: markers placed in the editor decide who reads what."""
     edited = "Người dẫn chuyện nói. [GiongNu2] Cô ấy trả lời. Rồi nói thêm."

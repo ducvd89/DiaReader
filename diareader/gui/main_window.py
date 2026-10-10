@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QMainWindow, QMessageBox, QProgressDialog, QSplitter,
-    QWidget, QVBoxLayout, QLabel
+    QWidget, QVBoxLayout, QLabel, QPushButton
 )
 
 from .. import (
@@ -56,7 +56,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DiaReader")
-        self.resize(1000, 640)
+        self.resize(1180, 720)
 
         self.settings = config.Settings.load()
         config.ensure_dirs()
@@ -100,20 +100,30 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(QLabel("Chapters"))
+        book_title = QLabel("1 · Choose a book")
+        book_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        left_layout.addWidget(book_title)
+        open_button = QPushButton("Open TXT or EPUB…")
+        open_button.clicked.connect(self.open_book)
+        left_layout.addWidget(open_button)
+        chapter_hint = QLabel("Select one or more chapters to work on.")
+        chapter_hint.setWordWrap(True)
+        chapter_hint.setStyleSheet("color: gray;")
+        left_layout.addWidget(chapter_hint)
         left_layout.addWidget(self.chapter_list)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
         splitter.addWidget(self.controls)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([260, 740])
+        splitter.setSizes([310, 870])
         self.setCentralWidget(splitter)
 
         self._build_menu()
         self._connect_controls()
         self.chapter_list.itemSelectionChanged.connect(self._update_selection_status)
         self._install_log_bridge()
+        self._update_engine_summary()
         self._check_cuda_on_startup()
 
     def _build_menu(self) -> None:
@@ -137,6 +147,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Quit", self.close)
 
     def _connect_controls(self) -> None:
+        self.controls.settings_clicked.connect(self.open_settings)
         self.controls.load_model_clicked.connect(self.load_model)
         self.controls.unload_model_clicked.connect(self.unload_model)
         self.controls.edit_script_clicked.connect(self.edit_script)
@@ -157,6 +168,10 @@ class MainWindow(QMainWindow):
         diareader_log.setLevel(logging.INFO)
 
     def _check_cuda_on_startup(self) -> None:
+        if self.settings.tts_engine == "vieneu":
+            self.controls.export_button.setEnabled(True)
+            self.controls.set_status("Ready — VieNeu runs on CPU. Open a book to start.")
+            return
         try:
             device = require_cuda()
         except CudaNotAvailableError as e:
@@ -330,12 +345,29 @@ class MainWindow(QMainWindow):
             )
 
     def open_settings(self) -> None:
+        old_engine_id = config.cache_engine_id(self.settings)
         dialog = SettingsDialog(self.settings, self, model_loaded=self.engine is not None)
         if dialog.exec():
             self.settings = dialog.apply()
+            if config.cache_engine_id(self.settings) != old_engine_id:
+                if self._cache is not None:
+                    self._cache.save()
+                self._cache = None
+            if self.engine is None:
+                self._check_cuda_on_startup()
+            self._update_engine_summary()
             # TF32 is only editable while no model is loaded, so it is applied at load
             # time. Nothing to re-apply here.
             log.info("Settings saved")
+
+    def _update_engine_summary(self) -> None:
+        if self.settings.tts_engine == "vieneu":
+            selected = voice.resolve_name(self.settings, None)
+            shown = voice.display_name(selected) if selected else self.settings.vieneu_voice
+        else:
+            selected = voice.resolve_name(self.settings, None)
+            shown = voice.display_name(selected) if selected else "model default voice"
+        self.controls.set_engine_summary(config.TTS_ENGINES[self.settings.tts_engine], shown)
 
     # --- model loading ------------------------------------------------------
 
@@ -347,7 +379,7 @@ class MainWindow(QMainWindow):
         later as an unexplained delay after pressing Play.
         """
         if self.engine is not None:
-            QMessageBox.information(self, "Already loaded", "The model is already in VRAM.")
+            QMessageBox.information(self, "Already loaded", "The model is already loaded.")
             return
         self._ensure_engine(lambda: None)
 
@@ -363,7 +395,8 @@ class MainWindow(QMainWindow):
         self.engine = None
         remaining = free_vram()
         self.controls.set_idle(model_loaded=False)
-        self.controls.set_status(f"Model unloaded — {remaining:.1f} GB still allocated")
+        self.controls.set_status("Model unloaded" if self.settings.tts_engine == "vieneu"
+                                 else f"Model unloaded — {remaining:.1f} GB still allocated")
         log.info("Model unloaded; %.1f GB CUDA memory still allocated", remaining)
 
     def _ensure_engine(self, on_ready) -> None:
@@ -372,6 +405,8 @@ class MainWindow(QMainWindow):
             return
         self.controls.set_indeterminate("Loading model…")
         self.controls.set_status(
+            "Loading VieNeu — first run downloads model files."
+            if self.settings.tts_engine == "vieneu" else
             "Loading model — the first run downloads ~6.4 GB and can take a while."
         )
         self.load_worker = ModelLoadWorker(self.settings)
@@ -794,9 +829,12 @@ class MainWindow(QMainWindow):
 
     def _sentence_cache(self):
         """The take cache for the book that is open, made once and kept."""
+        engine_id = config.cache_engine_id(self.settings)
         if (self._cache is None
-                or str(self._cache.book_path) != str(Path(self.current_book_path))):
-            self._cache = sentence_cache.SentenceCache(self.current_book_path)
+                or str(self._cache.book_path) != str(Path(self.current_book_path))
+                or self._cache_engine_id != engine_id):
+            self._cache = sentence_cache.SentenceCache(self.current_book_path, engine=engine_id)
+            self._cache_engine_id = engine_id
         return self._cache
 
     def _start_render(self, cache, plan, speed, *, then=None, in_use: bool = True) -> None:

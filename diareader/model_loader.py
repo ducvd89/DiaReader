@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 
 class CudaNotAvailableError(RuntimeError):
-    """Raised when no CUDA-capable GPU is available. This app has no CPU fallback."""
+    """Raised when Dia is selected without a CUDA-capable GPU."""
 
 
 class TorchCompileUnavailableError(RuntimeError):
@@ -47,8 +47,8 @@ class TorchCompileUnavailableError(RuntimeError):
 def require_cuda() -> torch.device:
     if not torch.cuda.is_available():
         raise CudaNotAvailableError(
-            "No CUDA-capable NVIDIA GPU was detected. DiaReader requires CUDA and does "
-            "not support CPU inference. Check your NVIDIA driver and that your installed "
+            "No CUDA-capable NVIDIA GPU was detected. The Dia engine requires CUDA. "
+            "Choose VieNeu in Settings for CPU inference, or check your NVIDIA driver and installed "
             "PyTorch build matches your GPU/CUDA version (see README.md)."
         )
     return torch.device("cuda")

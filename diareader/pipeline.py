@@ -268,7 +268,7 @@ def iter_book_audio(
         chapters = text_extract.load_book(book_path)
     wanted = set(chapter_indices) if chapter_indices is not None else None
 
-    available = voice.load_voices(settings)
+    available = voice.available_voices(settings)
     if available:
         log.info(
             "Voices available: %s (starting with %s)",
@@ -278,7 +278,8 @@ def iter_book_audio(
         # decoded, every single sentence will fail the same way and the export
         # completes as a silent file. One probe is enough — they all go through the
         # same decoder.
-        voice.check_reference_readable(next(iter(available.values())))
+        if settings.tts_engine == "dia":
+            voice.check_reference_readable(next(iter(available.values())))
 
     if speed is None:
         speed = getattr(settings, "speed", 1.0) or 1.0
@@ -439,7 +440,7 @@ def export_book(
     plan = sentence_plan(
         chapters, settings, chapter_indices=chapter_indices, start_voice=start_voice
     )
-    cache = sentence_cache.SentenceCache(book_path)
+    cache = sentence_cache.SentenceCache(book_path, engine=config.cache_engine_id(settings))
     gaps = set(cache.missing(
         [(p.chapter_index, p.position, p.text, p.voice) for p in plan], speed
     ))
@@ -483,7 +484,7 @@ def sentence_plan(
     wanted = set(chapter_indices) if chapter_indices is not None else None
     current_voice = start_voice
     # Loaded once: resolving per sentence would stat every reference WAV per sentence.
-    available = voice.load_voices(settings)
+    available = voice.available_voices(settings)
     plan: list[PlannedSentence] = []
     for chapter_index, chapter in enumerate(chapters):
         if wanted is not None and chapter_index not in wanted:
@@ -536,8 +537,8 @@ def render_sentences(
         speed = getattr(settings, "speed", 1.0) or 1.0
 
     verifier = _make_verifier(settings, stage)
-    available = voice.load_voices(settings)
-    if available:
+    available = voice.available_voices(settings)
+    if available and settings.tts_engine == "dia":
         voice.check_reference_readable(next(iter(available.values())))
 
     written = 0

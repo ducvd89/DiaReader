@@ -81,9 +81,12 @@ class ChapterTakes:
 class SentenceCache:
     """The takes for one book, and the file layout under them."""
 
-    def __init__(self, book_path: str | Path):
+    def __init__(self, book_path: str | Path, engine: str = "dia"):
         self.book_path = Path(book_path)
-        self.dir = CACHE_ROOT / book_key(book_path)
+        # Keep the original Dia directory exactly as it was. Other engines get their
+        # own takes, so switching engines never reuses another model's narration.
+        suffix = "" if engine == "dia" else f"-{engine}"
+        self.dir = CACHE_ROOT / f"{book_key(book_path)}{suffix}"
         self._chapters: dict[str, ChapterTakes] = {}
         self._load()
 

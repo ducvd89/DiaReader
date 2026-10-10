@@ -48,6 +48,9 @@ def main() -> None:
             pass
 
     app = QApplication(sys.argv)
+    # Wayland has no per-window icon: the compositor takes it from the .desktop file
+    # this names (packaging/arch/diareader.desktop), and without it shows a generic one.
+    app.setDesktopFileName("diareader")
     # On the application, not the window: dialogs and message boxes inherit it, so
     # the icon follows every window the app opens rather than just the main one.
     icon_path = config.asset_path("icon.ico")

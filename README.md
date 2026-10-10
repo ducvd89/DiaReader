@@ -1,28 +1,43 @@
 # DiaReader
 
-Turn `.txt` / `.epub` ebooks into Vietnamese audiobook files (WAV/MP3) using the
-[cosrigel/dia-finetuning-vnese](https://huggingface.co/cosrigel/dia-finetuning-vnese) checkpoint (a
-Vietnamese fine-tune of Nari Labs' Dia-1.6B TTS model).
+Turn `.txt` / `.epub` ebooks into Vietnamese audiobook files (WAV/MP3) using
+[cosrigel/dia-finetuning-vnese](https://huggingface.co/cosrigel/dia-finetuning-vnese)
+or [VieNeu-TTS v3 Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo).
 
-**Requires an NVIDIA GPU with CUDA. There is no CPU mode.**
+Dia requires an NVIDIA GPU with CUDA. VieNeu runs through its ONNX/CPU backend and
+does not require CUDA. The rest of the app's book, voice, sentence review, and export
+workflow is shared.
 
-## 1. Get access to the model
+### Choosing VieNeu
+
+Install the dependencies below, then run `pip install -r requirements-vieneu.txt` and
+choose **Change engine or voice… → Reading → Speech engine → VieNeu-TTS v3 Turbo**
+before loading the model. The **Voices → VieNeu presets** page lists all 25 built-in
+voices from the pinned SDK, with a script marker for each. Select one there and click
+**Use selected voice by default**, or insert its marker (for example
+`[VieNeu_Hai_Dang]`) to switch voices mid-book. Named reference voices are still
+available for cloning. Uncheck **Use preset for unmarked text** to use the library's
+default reference voice as with Dia. VieNeu downloads its model files
+on the first load. Switching back to Dia preserves Dia's existing sentence cache;
+VieNeu's renders are cached separately. Unload the model before changing engines.
+
+## 1. Get access to the Dia model (Dia only)
 
 1. Log into Hugging Face and accept the license on the
    [model page](https://huggingface.co/cosrigel/dia-finetuning-vnese) (CC-BY-NC-SA-4.0, non-commercial).
 2. Create an access token at https://huggingface.co/settings/tokens (read access is enough).
 3. Copy `.env.example` to `.env` and paste your token into `HF_TOKEN=`.
 
-## 2. Install the app, then (re)install PyTorch for your GPU
+## 2. Install the app; Dia users then (re)install PyTorch for their GPU
 
-The `nari-tts` (Dia) package pulls in its own `torch` as a dependency, which will silently overwrite any
-GPU build you installed first with a generic CPU-only one. So install in this order:
+The `nari-tts` (Dia) package pulls in its own `torch` as a dependency, which can overwrite a
+GPU build. Install the app dependencies first:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Then install/overwrite with the PyTorch build that matches your GPU. Check
+If using Dia, then install/overwrite with the PyTorch build that matches your GPU. Check
 https://pytorch.org/get-started/locally/ (or the nightly index for the newest builds) for the current
 command.
 
@@ -51,7 +66,7 @@ Verify it worked:
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-`torch.cuda.is_available()` must print `True` — the app refuses to run otherwise. If it prints `False`
+`torch.cuda.is_available()` must print `True` for Dia. If it prints `False`
 after `pip install -r requirements.txt`, it's almost always this dependency-downgrade issue — rerun the
 `--force-reinstall --no-deps` command above.
 
@@ -82,6 +97,53 @@ in per-sentence warnings. That is exactly how one 54-sentence export was lost, s
 `pipeline.iter_book_audio` now probes the reference audio once before any GPU work and fails with the
 command above. Configure no voices at all and this is moot: the checkpoint was fine-tuned without
 audio prompts.
+
+## Arch Linux
+
+Steps 2 and the FFmpeg section above are the Windows route. On Arch, one script does the
+install in the right order. It pins the CUDA 13 build of PyTorch (`packaging/linux/constraints.txt`)
+and installs the pinned `nari-tts` with `--no-deps`. That pin asks for `torch==2.6.0`, which has
+no Python 3.14 wheel, so a plain `pip install -r requirements.txt` cannot resolve here.
+
+```bash
+sudo pacman -S --needed python ffmpeg gcc nvidia-utils
+```
+
+```bash
+python -m venv .venv
+```
+
+```bash
+packaging/linux/install_deps.sh .venv/bin/python
+```
+
+```bash
+.venv/bin/python main.py
+```
+
+Or build a package that installs to `/opt/diareader`, with `diareader` and `diareader-cli`
+on PATH and a menu entry:
+
+```bash
+cd packaging/arch && makepkg -si
+```
+
+What differs from Windows:
+
+- **FFmpeg is the system package.** torchcodec finds `libavutil.so` through the normal
+  library path, so `ffmpeg_dlls` does nothing here. `DIAREADER_FFMPEG_BIN` and the winget
+  search are Windows-only.
+- **torch.compile uses the system gcc and Python headers.** No bundled TinyCC or
+  `pybuild/`, so the `gcc` and `python` packages are what it needs.
+- **Settings, voices and caches** live in `$XDG_DATA_HOME/DiaReader`
+  (`~/.local/share/DiaReader`) instead of `%APPDATA%\DiaReader`. Copying that folder over
+  from Windows works: voice paths stored as `C:\Users\...\X.wav` resolve by filename.
+- **The token** goes in Settings, or `HF_TOKEN` in the environment. The packaged build lives
+  in `/opt`, so it has no `.env` you can edit.
+
+Verified on an RTX 5080 Laptop with driver 615, Python 3.14 and torch 2.14.1+cu130:
+`main.py --selftest` passes every row except the token, including torch.compile (whole
+graph). All tests pass.
 
 ## 4. Run it
 

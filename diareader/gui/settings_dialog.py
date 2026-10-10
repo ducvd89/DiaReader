@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QTabWidget,
-    QVBoxLayout, QWidget
+    QScrollArea, QVBoxLayout, QWidget
 )
 
-from .. import config, voice, voice_backup
+from .. import config, voice, voice_backup, vieneu_presets
 from .widgets import SPEED_CHOICES, speed_label
 
 
@@ -238,6 +239,8 @@ class VoicesTab(QWidget):
     encoder, so the two must line up or the model drifts.
     """
 
+    preset_selected = Signal(str)
+
     def __init__(self, settings: config.Settings, parent=None):
         super().__init__(parent)
         self.settings = settings
@@ -247,6 +250,41 @@ class VoicesTab(QWidget):
         self.transcript_label.setWordWrap(True)
         self.transcript_label.setStyleSheet("color: gray;")
         self.voice_list.currentTextChanged.connect(self._show_transcript)
+
+        self.preset_list = QListWidget()
+        for preset in vieneu_presets.presets():
+            self.preset_list.addItem(f"{preset.name}   ·   {preset.description}")
+            self.preset_list.item(self.preset_list.count() - 1).setData(
+                Qt.ItemDataRole.UserRole, preset.name
+            )
+            self.preset_list.item(self.preset_list.count() - 1).setToolTip(
+                f"Script marker: [{preset.marker}]"
+            )
+        preset_hint = QLabel(
+            f"All {self.preset_list.count()} voices are included with VieNeu. "
+            "Select one to use by default, or copy its marker into a chapter script "
+            "to switch voices mid-book."
+        )
+        preset_hint.setWordWrap(True)
+        preset_hint.setStyleSheet("color: gray;")
+        self.preset_marker = QLabel("Select a voice to see its script marker.")
+        self.preset_marker.setStyleSheet("font-weight: 600;")
+        self.preset_list.currentItemChanged.connect(self._show_preset)
+        use_preset = QPushButton("Use selected voice by default")
+        use_preset.clicked.connect(self._use_preset)
+        copy_marker = QPushButton("Copy script marker")
+        copy_marker.clicked.connect(self._copy_preset_marker)
+        preset_buttons = QHBoxLayout()
+        preset_buttons.addWidget(use_preset)
+        preset_buttons.addWidget(copy_marker)
+
+        preset_page = QWidget()
+        preset_layout = QVBoxLayout(preset_page)
+        preset_layout.addWidget(preset_hint)
+        preset_layout.addWidget(self.preset_list, stretch=1)
+        preset_layout.addWidget(self.preset_marker)
+        preset_layout.addLayout(preset_buttons)
+        self.preset_page = preset_page
 
         add_button = QPushButton("Add from WAV…")
         add_button.clicked.connect(self._add_voice)
@@ -282,15 +320,52 @@ class VoicesTab(QWidget):
         hint.setWordWrap(True)
         hint.setStyleSheet("color: gray;")
 
+        custom_page = QWidget()
+        custom_layout = QVBoxLayout(custom_page)
+        custom_layout.addWidget(self.voice_list, stretch=1)
+        custom_layout.addWidget(self.transcript_label)
+        custom_layout.addLayout(buttons)
+        custom_layout.addLayout(library_buttons)
+        custom_layout.addWidget(hint)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(custom_page, "My reference voices")
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Voices"))
-        layout.addWidget(self.voice_list)
-        layout.addWidget(self.transcript_label)
-        layout.addLayout(buttons)
-        layout.addLayout(library_buttons)
-        layout.addWidget(hint)
+        layout.addWidget(self.tabs)
 
         self._refresh()
+        self.set_engine(settings.tts_engine)
+
+    def set_engine(self, engine: str) -> None:
+        index = self.tabs.indexOf(self.preset_page)
+        if engine == "vieneu" and index < 0:
+            self.tabs.insertTab(0, self.preset_page, f"VieNeu presets ({self.preset_list.count()})")
+            self.tabs.setCurrentIndex(0)
+        elif engine != "vieneu" and index >= 0:
+            self.tabs.removeTab(index)
+
+    def _selected_preset(self):
+        item = self.preset_list.currentItem()
+        name = item.data(Qt.ItemDataRole.UserRole) if item else None
+        return next((p for p in vieneu_presets.presets() if p.name == name), None)
+
+    def _show_preset(self) -> None:
+        selected = self._selected_preset()
+        self.preset_marker.setText(
+            f"Script marker: [{selected.marker}]" if selected
+            else "Select a voice to see its script marker."
+        )
+
+    def _use_preset(self) -> None:
+        selected = self._selected_preset()
+        if selected:
+            self.preset_selected.emit(selected.name)
+
+    def _copy_preset_marker(self) -> None:
+        selected = self._selected_preset()
+        if selected:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(f"[{selected.marker}] ")
 
     def _refresh(self) -> None:
         self.voice_list.clear()
@@ -395,6 +470,24 @@ class SettingsDialog(QDialog):
         self.token_edit = QLineEdit(settings.hf_token)
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
 
+        self.engine_combo = QComboBox()
+        for key, label in config.TTS_ENGINES.items():
+            self.engine_combo.addItem(label, key)
+        self.engine_combo.setCurrentIndex(max(0, self.engine_combo.findData(settings.tts_engine)))
+        self.engine_combo.setEnabled(not model_loaded)
+
+        self.vieneu_voice_combo = QComboBox()
+        for preset in vieneu_presets.presets():
+            self.vieneu_voice_combo.addItem(preset.name, preset.name)
+            self.vieneu_voice_combo.setItemData(
+                self.vieneu_voice_combo.count() - 1, preset.description,
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self.vieneu_voice_combo.setCurrentText(settings.vieneu_voice)
+        self.vieneu_preset_check = QCheckBox("Use preset for unmarked text")
+        self.vieneu_preset_check.setChecked(settings.vieneu_use_preset)
+        self.engine_combo.currentIndexChanged.connect(self._update_engine_controls)
+
         self.speed_combo = QComboBox()
         for value in SPEED_CHOICES:
             self.speed_combo.addItem(speed_label(value), value)
@@ -469,25 +562,47 @@ class SettingsDialog(QDialog):
         speed_hint.setWordWrap(True)
         speed_hint.setStyleSheet("color: gray;")
 
-        general = QWidget()
-        form = QFormLayout(general)
-        form.addRow("Hugging Face token", self.token_edit)
-        form.addRow("Reading speed", self.speed_combo)
-        form.addRow("", speed_hint)
-        form.addRow("Precision", self.precision_combo)
-        form.addRow("", self.precision_hint)
-        form.addRow("Performance", self.compile_check)
-        form.addRow("", compile_hint)
-        form.addRow("Quality check", self.verify_check)
-        form.addRow("", verify_hint)
-        form.addRow("Default export folder", output_row)
-        form.addRow("GPU", QLabel(_cuda_info_text()))
+        reading = QWidget()
+        reading_form = QFormLayout(reading)
+        reading_form.addRow("Speech engine", self.engine_combo)
+        reading_form.addRow("Default VieNeu voice", self.vieneu_voice_combo)
+        reading_form.addRow("", self.vieneu_preset_check)
+        vieneu_hint = QLabel(
+            "All built-in voices appear on the Voices tab and in the script editor. "
+            "Named reference voices remain available for cloning."
+        )
+        vieneu_hint.setWordWrap(True)
+        reading_form.addRow("", vieneu_hint)
+        reading_form.addRow("Reading speed", self.speed_combo)
+        reading_form.addRow("", speed_hint)
+        reading_form.addRow("Default export folder", output_row)
+
+        advanced = QWidget()
+        advanced_form = QFormLayout(advanced)
+        advanced_form.addRow("Hugging Face token", self.token_edit)
+        advanced_form.addRow("Dia precision", self.precision_combo)
+        advanced_form.addRow("", self.precision_hint)
+        advanced_form.addRow("Dia performance", self.compile_check)
+        advanced_form.addRow("", compile_hint)
+        advanced_form.addRow("Quality check", self.verify_check)
+        advanced_form.addRow("", verify_hint)
+        advanced_form.addRow("GPU", QLabel(_cuda_info_text()))
+        advanced_scroll = QScrollArea()
+        advanced_scroll.setWidgetResizable(True)
+        advanced_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        advanced_scroll.setWidget(advanced)
 
         self.voices_tab = VoicesTab(settings)
+        self.voices_tab.preset_selected.connect(self.vieneu_voice_combo.setCurrentText)
+        self.voices_tab.preset_selected.connect(
+            lambda _name: self.vieneu_preset_check.setChecked(True)
+        )
 
         tabs = QTabWidget()
-        tabs.addTab(general, "General")
+        tabs.addTab(reading, "Reading")
         tabs.addTab(self.voices_tab, "Voices")
+        tabs.addTab(advanced_scroll, "Advanced")
+        self._update_engine_controls()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -508,7 +623,20 @@ class SettingsDialog(QDialog):
         key = self.precision_combo.currentData() or config.DEFAULT_PRECISION
         self.precision_hint.setText(_PRECISION_HINTS[key] + self._precision_warning)
 
+    def _update_engine_controls(self) -> None:
+        is_dia = self.engine_combo.currentData() == "dia"
+        self.vieneu_voice_combo.setEnabled(not is_dia and not self.model_loaded)
+        self.vieneu_preset_check.setEnabled(not is_dia and not self.model_loaded)
+        self.precision_combo.setEnabled(is_dia and not self.model_loaded)
+        self.compile_check.setEnabled(is_dia and not self.model_loaded)
+        if hasattr(self, "voices_tab"):
+            self.voices_tab.set_engine(self.engine_combo.currentData())
+
     def apply(self) -> config.Settings:
+        if self.engine_combo.isEnabled():
+            self.settings.tts_engine = self.engine_combo.currentData()
+            self.settings.vieneu_voice = self.vieneu_voice_combo.currentText()
+            self.settings.vieneu_use_preset = self.vieneu_preset_check.isChecked()
         self.settings.hf_token = self.token_edit.text().strip()
         self.settings.output_dir = self.output_dir_edit.text().strip()
         self.settings.speed = float(self.speed_combo.currentData())

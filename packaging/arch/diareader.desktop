@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=DiaReader
+GenericName=Audiobook Maker
+Comment=Turn .txt/.epub books into Vietnamese audiobooks
+Exec=diareader
+Icon=diareader
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=tts;audiobook;epub;vietnamese;

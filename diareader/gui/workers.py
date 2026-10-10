@@ -35,9 +35,13 @@ class ModelLoadWorker(QThread):
 
     def run(self) -> None:
         try:
-            engine = TtsEngine(
-                load_model(self.settings, on_stage=lambda m: self.stage.emit(m))
-            )
+            if self.settings.tts_engine == "vieneu":
+                from ..vieneu_engine import load_vieneu
+                engine = load_vieneu(self.settings, on_stage=lambda m: self.stage.emit(m))
+            else:
+                engine = TtsEngine(
+                    load_model(self.settings, on_stage=lambda m: self.stage.emit(m))
+                )
         except (CudaNotAvailableError, TorchCompileUnavailableError) as e:
             # Both already say what is wrong and what to do about it; wrapping them
             # in "Failed to load model:" would only bury the instructions.

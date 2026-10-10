@@ -34,14 +34,18 @@ log = logging.getLogger("diareader.cli")
 
 def _load_engine():
     settings = config.Settings.load()
-    if not settings.hf_token:
+    if settings.tts_engine == "dia" and not settings.hf_token:
         log.error(
             "No Hugging Face token found. Copy .env.example to .env and set HF_TOKEN, "
             "or set it in Settings."
         )
         sys.exit(1)
     try:
-        engine = TtsEngine(load_model(settings))
+        if settings.tts_engine == "vieneu":
+            from .vieneu_engine import load_vieneu
+            engine = load_vieneu(settings)
+        else:
+            engine = TtsEngine(load_model(settings))
     except CudaNotAvailableError as e:
         log.error(str(e))
         sys.exit(1)
@@ -72,16 +76,19 @@ def cmd_voices(args: argparse.Namespace) -> None:
     from . import voice
 
     settings = config.Settings.load()
-    voices = voice.load_voices(settings)
+    voices = voice.available_voices(settings)
     if not voices:
         print("No voices configured. The model's own default voice will be used.")
         print("Add one in the GUI under Settings -> Voices.")
         return
     for name, ref in sorted(voices.items()):
         marker = " (default)" if name == settings.default_voice else ""
-        print(f"{name}{marker}")
-        print(f"    wav:        {ref.wav_path}")
-        print(f"    transcript: {ref.transcript}")
+        if isinstance(ref, voice.PresetVoice):
+            print(f"{ref.preset} [{name}]{marker} — VieNeu preset")
+        else:
+            print(f"{name}{marker}")
+            print(f"    wav:        {ref.wav_path}")
+            print(f"    transcript: {ref.transcript}")
     print()
     print("Use a name with --voice, or switch mid-text with a marker like [GiongNu2].")
 

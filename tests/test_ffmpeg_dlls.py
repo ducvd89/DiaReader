@@ -5,6 +5,7 @@ Since Python 3.8 Windows resolves an extension module's DLL *dependencies* throu
 libraries on a machine that had exactly the FFmpeg build the error message told the
 user to install.
 """
+import os
 import sys
 
 import pytest
@@ -22,7 +23,7 @@ def _make_shared_build(directory, soname="avutil-61.dll"):
 def test_finds_a_build_on_path(tmp_path, monkeypatch):
     ffmpeg_bin = _make_shared_build(tmp_path / "ffmpeg" / "bin")
     monkeypatch.delenv(ffmpeg_dlls.ENV_OVERRIDE, raising=False)
-    monkeypatch.setenv("PATH", str(tmp_path / "nothing-here") + ";" + str(ffmpeg_bin))
+    monkeypatch.setenv("PATH", str(tmp_path / "nothing-here") + os.pathsep + str(ffmpeg_bin))
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
 
     assert ffmpeg_dlls.find_ffmpeg_dir() == ffmpeg_bin
@@ -69,7 +70,7 @@ def test_prefers_a_real_install_over_a_bundle_inside_site_packages(tmp_path, mon
     real = _make_shared_build(tmp_path / "ffmpeg" / "bin")
 
     monkeypatch.delenv(ffmpeg_dlls.ENV_OVERRIDE, raising=False)
-    monkeypatch.setenv("PATH", str(qt_bundle) + ";" + str(real))
+    monkeypatch.setenv("PATH", str(qt_bundle) + os.pathsep + str(real))
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
 
     assert ffmpeg_dlls.find_ffmpeg_dir() == real

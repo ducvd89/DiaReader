@@ -14,14 +14,16 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
 import numpy as np
 import soundfile as sf
 
 from . import audio_io, config
+from . import vieneu_presets
 
 if TYPE_CHECKING:
     from .tts_engine import TtsEngine
@@ -40,6 +42,12 @@ class VoiceReference:
     transcript: str
 
 
+@dataclass(frozen=True)
+class PresetVoice:
+    name: str           # script marker, e.g. VieNeu_Hai_Dang
+    preset: str         # name accepted by the VieNeu SDK, e.g. Hải Đăng
+
+
 def resolve_wav(stored: str) -> Path:
     """Locate a voice's WAV from whatever the settings file recorded.
 
@@ -48,6 +56,11 @@ def resolve_wav(stored: str) -> Path:
     silently drop the voice there. Absolute paths from older settings still work, and
     fall back to the same filename in the local voice folder if the original is gone.
     """
+    # A settings file written on Windows and opened on Linux holds paths like
+    # C:\Users\...\voice_refs\X.wav, which a POSIX Path sees as one relative
+    # filename — so the voice "resolved" to a file named after the whole path.
+    if "\\" in stored and not Path(stored).exists():
+        return config.VOICE_REF_DIR / PureWindowsPath(stored).name
     path = Path(stored)
     if not path.is_absolute():
         return config.VOICE_REF_DIR / path
@@ -69,6 +82,23 @@ def load_voices(settings: "config.Settings") -> dict[str, VoiceReference]:
     return voices
 
 
+def available_voices(settings: "config.Settings") -> dict[str, VoiceReference | PresetVoice]:
+    """Custom references plus every SDK preset when VieNeu is selected."""
+    result: dict[str, VoiceReference | PresetVoice] = load_voices(settings)
+    if getattr(settings, "tts_engine", "dia") == "vieneu":
+        for preset in vieneu_presets.presets():
+            if preset.marker in result:
+                log.warning("Custom voice %s masks a VieNeu preset marker", preset.marker)
+                continue
+            result[preset.marker] = PresetVoice(preset.marker, preset.name)
+    return result
+
+
+def display_name(marker: str) -> str:
+    preset = vieneu_presets.name_for_marker(marker)
+    return f"{preset} · VieNeu" if preset else marker
+
+
 def resolve_name(
     settings: "config.Settings", name: str | None, available: dict | None = None
 ) -> str | None:
@@ -84,7 +114,26 @@ def resolve_name(
     `available` lets a caller resolving hundreds of sentences load the library once;
     load_voices stats every WAV.
     """
-    voices = load_voices(settings) if available is None else available
+    voices = available_voices(settings) if available is None else available
+    if (getattr(settings, "tts_engine", "dia") == "vieneu"
+            and getattr(settings, "vieneu_use_preset", True)):
+        # An unmarked sentence uses VieNeu's selected preset even when the user has
+        # a Dia default reference in the library. Explicit [Name] markers still
+        # resolve to that library, so a book can switch voices mid-chapter.
+        if name and name in voices:
+            return name
+        default = vieneu_presets.marker_for_name(settings.vieneu_voice)
+        return default if default in voices else None
+    if getattr(settings, "tts_engine", "dia") == "vieneu":
+        if name and name in voices:
+            return name
+        custom = {k: v for k, v in voices.items() if isinstance(v, VoiceReference)}
+        if settings.default_voice in custom:
+            return settings.default_voice
+        if custom:
+            return next(iter(custom))
+        default = vieneu_presets.marker_for_name(settings.vieneu_voice)
+        return default if default in voices else None
     if not voices:
         return None
     if name and name in voices:
@@ -95,10 +144,10 @@ def resolve_name(
     return next(iter(voices))
 
 
-def get_voice(settings: "config.Settings", name: str | None) -> VoiceReference | None:
+def get_voice(settings: "config.Settings", name: str | None) -> VoiceReference | PresetVoice | None:
     """Resolve a voice name. None (or an unknown name) falls back to the default voice,
     and if none is configured, to unconditioned generation."""
-    voices = load_voices(settings)
+    voices = available_voices(settings)
     if name and voices and name not in voices:
         log.warning("Unknown voice %r; falling back to the default voice.", name)
     resolved = resolve_name(settings, name, voices)
@@ -117,7 +166,7 @@ def voice_names_in_library_order(settings: "config.Settings") -> list[str]:
     leaving every existing voice's colour alone. Sorting instead would reshuffle the
     whole cast the first time someone added a voice early in the alphabet.
     """
-    return list(load_voices(settings).keys())
+    return list(available_voices(settings).keys())
 
 
 class ReferenceAudioUnreadable(RuntimeError):
@@ -143,15 +192,24 @@ def check_reference_readable(ref: VoiceReference) -> None:
     try:
         audio, _ = torchaudio.load(str(ref.wav_path), channels_first=True)
     except Exception as e:  # noqa: BLE001 — any decode failure is fatal the same way
+        if sys.platform == "win32":
+            where = (
+                "DiaReader searches PATH and winget's package directory at startup. If "
+                f"your build lives elsewhere, point {ffmpeg_dlls.ENV_OVERRIDE} at the "
+                "directory holding avutil-*.dll.\n\n"
+            )
+        else:
+            where = (
+                "torchcodec finds them through the system library path; its build "
+                "supports FFmpeg 4 through 9.\n\n"
+            )
         raise ReferenceAudioUnreadable(
             f"Cannot read the reference audio for voice {ref.name!r} ({ref.wav_path}).\n\n"
             f"{type(e).__name__}: {str(e)[:300]}\n\n"
             "If this mentions libtorchcodec, FFmpeg's shared libraries are missing. "
             "Install a shared build, then reopen the app so it can find them:\n"
-            "    winget install Gyan.FFmpeg.Shared\n\n"
-            "DiaReader searches PATH and winget's package directory at startup. If "
-            f"your build lives elsewhere, point {ffmpeg_dlls.ENV_OVERRIDE} at the "
-            "directory holding avutil-*.dll.\n\n"
+            f"    {ffmpeg_dlls.install_hint()}\n\n"
+            f"{where}"
             "Alternatively remove every voice under Settings -> Voices; this "
             "checkpoint was fine-tuned without audio prompts, so unconditioned "
             "generation is a perfectly good default."

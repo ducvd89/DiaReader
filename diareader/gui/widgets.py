@@ -6,7 +6,7 @@ import logging
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QListWidget, QPlainTextEdit, QProgressBar, QPushButton,
+    QGroupBox, QHBoxLayout, QLabel, QListWidget, QPlainTextEdit, QProgressBar, QPushButton,
     QVBoxLayout, QWidget
 )
 
@@ -118,6 +118,7 @@ class LogPanel(QPlainTextEdit):
 
 
 class PlayerControls(QWidget):
+    settings_clicked = Signal()
     load_model_clicked = Signal()
     unload_model_clicked = Signal()
     edit_script_clicked = Signal()
@@ -127,6 +128,18 @@ class PlayerControls(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        title = QLabel("Make an audiobook")
+        title.setStyleSheet("font-size: 21px; font-weight: 700;")
+        intro = QLabel("Choose a voice, prepare a chapter, then export your audio.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: gray;")
+
+        self.engine_label = QLabel("Speech engine")
+        self.engine_label.setWordWrap(True)
+        self.engine_label.setStyleSheet("font-weight: 600;")
+        self.settings_button = QPushButton("Change engine or voice…")
+        self.settings_button.clicked.connect(self.settings_clicked)
 
         self.status_label = QLabel("No book loaded")
         self.status_label.setWordWrap(True)
@@ -140,22 +153,28 @@ class PlayerControls(QWidget):
         # you can pay that cost up front and watch it, instead of discovering it when
         # you press Play.
         self.load_model_button = QPushButton("Load model")
-        self.unload_model_button = QPushButton("Unload")
+        self.unload_model_button = QPushButton("Unload model")
         self.unload_model_button.setToolTip(
             "Release the model and free VRAM without closing the app."
         )
-        self.edit_script_button = QPushButton("Edit script…")
+        self.edit_script_button = QPushButton("Edit chapter script…")
         self.edit_script_button.setToolTip(
             "Cast the selected chapter: drag voice markers into the text, then export it."
         )
-        self.review_button = QPushButton("Sentences…")
+        self.review_button = QPushButton("Review sentences…")
         self.review_button.setToolTip(
             "Every sentence of the selection, with the check's verdict on each. Tick "
             "the bad ones to render them again — in another voice if that helps — "
             "listen to the result, and keep it or leave the old one."
         )
         self.stop_button = QPushButton("Stop")
-        self.export_button = QPushButton("Export audio file…")
+        self.export_button = QPushButton("Export audiobook…")
+        self.export_button.setStyleSheet(
+            "QPushButton { background: #2563eb; color: white; font-weight: 600; "
+            "padding: 8px 14px; border-radius: 5px; }"
+            "QPushButton:disabled { background: #64748b; }"
+            "QPushButton:hover:enabled { background: #1d4ed8; }"
+        )
         self.export_button.setToolTip(
             "Assemble the cached sentences into a WAV or MP3. Anything not rendered "
             "yet is generated first."
@@ -168,21 +187,35 @@ class PlayerControls(QWidget):
         self.stop_button.clicked.connect(self.stop_clicked)
         self.export_button.clicked.connect(self.export_clicked)
 
-        buttons = QHBoxLayout()
-        for b in (
-            self.load_model_button, self.unload_model_button,
-            self.edit_script_button, self.review_button,
-            self.export_button, self.stop_button,
-        ):
-            buttons.addWidget(b)
+        engine_box = QGroupBox("2 · Speech engine and voice")
+        engine_layout = QVBoxLayout(engine_box)
+        engine_layout.addWidget(self.engine_label)
+        engine_buttons = QHBoxLayout()
+        for button in (self.settings_button, self.load_model_button, self.unload_model_button):
+            engine_buttons.addWidget(button)
+        engine_layout.addLayout(engine_buttons)
+
+        prepare_box = QGroupBox("3 · Prepare and review")
+        prepare_layout = QHBoxLayout(prepare_box)
+        prepare_layout.addWidget(self.edit_script_button)
+        prepare_layout.addWidget(self.review_button)
+
+        export_box = QGroupBox("4 · Save your audiobook")
+        export_layout = QHBoxLayout(export_box)
+        export_layout.addWidget(self.export_button, stretch=1)
+        export_layout.addWidget(self.stop_button)
 
         self.log_panel = LogPanel()
 
         layout = QVBoxLayout(self)
+        layout.addWidget(title)
+        layout.addWidget(intro)
+        layout.addWidget(engine_box)
+        layout.addWidget(prepare_box)
+        layout.addWidget(export_box)
         layout.addWidget(self.status_label)
         layout.addWidget(self.progress_bar)
-        layout.addLayout(buttons)
-        layout.addWidget(QLabel("Log"))
+        layout.addWidget(QLabel("Activity"))
         layout.addWidget(self.log_panel, stretch=1)
 
         self.set_idle()
@@ -237,3 +270,6 @@ class PlayerControls(QWidget):
 
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
+
+    def set_engine_summary(self, engine: str, voice: str) -> None:
+        self.engine_label.setText(f"{engine}  ·  {voice}")

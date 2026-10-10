@@ -1,6 +1,7 @@
 """App-wide paths, model repo ids, and persisted user settings."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -14,7 +15,22 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DiaReader"
+def _app_dir() -> Path:
+    """Where settings, voices and caches live: %APPDATA% on Windows, XDG elsewhere.
+
+    The fallback used to be the home directory itself on every platform without
+    %APPDATA%, which on Linux meant a visible ~/DiaReader holding 6 GB of weights.
+    One folder rather than XDG's config/data/cache split, so "copy this folder to
+    move your voices and settings" stays true on both platforms.
+    """
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA", Path.home())) / "DiaReader"
+    xdg = os.environ.get("XDG_DATA_HOME", "").strip()
+    base = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "share"
+    return base / "DiaReader"
+
+
+APP_DIR = _app_dir()
 SETTINGS_PATH = APP_DIR / "settings.json"
 MODEL_CACHE_DIR = APP_DIR / "model_cache"
 VOICE_REF_DIR = APP_DIR / "voice_refs"
@@ -33,6 +49,18 @@ FINETUNE_CONFIG_FILE = "config_inference.json"
 BASE_CONFIG_FILE = "config.json"
 
 SAMPLE_RATE = 44100
+
+TTS_ENGINES = {"dia": "Dia (Vietnamese fine-tune)", "vieneu": "VieNeu-TTS v3 Turbo"}
+VIENEU_MODEL_REPO = "pnnbao-ump/VieNeu-TTS-v3-Turbo"
+VIENEU_DEFAULT_VOICE = "Hải Đăng"
+
+
+def cache_engine_id(settings: "Settings") -> str:
+    if settings.tts_engine == "dia":
+        return "dia"
+    choice = ("preset:" + (settings.vieneu_voice or VIENEU_DEFAULT_VOICE)
+              if settings.vieneu_use_preset else "reference-default")
+    return "vieneu-" + hashlib.sha1(choice.encode("utf-8")).hexdigest()[:8]
 
 
 
@@ -64,6 +92,9 @@ def resolve_precision(name: str) -> tuple[str, bool]:
 @dataclass
 class Settings:
     hf_token: str = ""
+    tts_engine: str = "dia"
+    vieneu_voice: str = VIENEU_DEFAULT_VOICE
+    vieneu_use_preset: bool = True
     # Legacy single-voice fields, kept so old settings files still load; migrated into
     # `voices` on first load.
     voice_ref_wav: str = ""
@@ -187,6 +218,15 @@ class Settings:
             settings.hf_token = os.environ.get("HF_TOKEN", "")
         settings._migrate_legacy_voice()
         settings._migrate_legacy_tf32(wrote_precision="precision" in data)
+        if settings.tts_engine not in TTS_ENGINES:
+            settings.tts_engine = "dia"
+        if settings.tts_engine == "vieneu":
+            from .vieneu_presets import canonical_name, presets
+
+            if presets():
+                settings.vieneu_voice = (
+                    canonical_name(settings.vieneu_voice) or VIENEU_DEFAULT_VOICE
+                )
         return settings
 
     def _migrate_legacy_tf32(self, wrote_precision: bool) -> None:

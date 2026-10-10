@@ -65,6 +65,21 @@ def run() -> tuple[bool, str]:
         rows.append(_line(False, "Console output",
                           f"{type(e).__name__}: {e} — downloads will crash the model load"))
 
+    from diareader import config
+    if config.Settings.load().tts_engine == "vieneu":
+        try:
+            from diareader.vieneu_engine import load_vieneu
+
+            engine = load_vieneu(config.Settings.load())
+            audio = engine.generate("Xin chào.")
+            if not len(audio):
+                raise RuntimeError("VieNeu generated no audio")
+            rows.append(_line(True, "VieNeu ONNX", f"generated {len(audio)} samples at 44.1 kHz"))
+        except Exception as e:  # noqa: BLE001
+            essential_ok = False
+            rows.append(_line(False, "VieNeu ONNX", f"{type(e).__name__}: {e}"))
+        return essential_ok, "\n".join(rows)
+
     # --- torch and the GPU ---
     try:
         import torch
@@ -90,13 +105,18 @@ def run() -> tuple[bool, str]:
     # no directory means none was found at all. Different fixes, same symptom.
     from diareader import ffmpeg_dlls
 
-    ffmpeg_dir = ffmpeg_dlls.registered_dir()
-    if ffmpeg_dir is not None:
-        rows.append(_line(True, "FFmpeg libraries", str(ffmpeg_dir)))
+    if sys.platform == "win32":
+        ffmpeg_dir = ffmpeg_dlls.registered_dir()
+        if ffmpeg_dir is not None:
+            rows.append(_line(True, "FFmpeg libraries", str(ffmpeg_dir)))
+        else:
+            rows.append(_line(None, "FFmpeg libraries",
+                              f"no shared build found — '{ffmpeg_dlls.install_hint()}', "
+                              f"or set {ffmpeg_dlls.ENV_OVERRIDE}"))
     else:
-        rows.append(_line(None, "FFmpeg libraries",
-                          "no shared build found — 'winget install Gyan.FFmpeg.Shared', "
-                          f"or set {ffmpeg_dlls.ENV_OVERRIDE}"))
+        libavutil = ffmpeg_dlls.system_library()
+        rows.append(_line(True if libavutil else None, "FFmpeg libraries",
+                          libavutil or f"libavutil not found — {ffmpeg_dlls.install_hint()}"))
 
     try:
         import torchaudio  # noqa: F401
@@ -106,7 +126,7 @@ def run() -> tuple[bool, str]:
     except Exception as e:  # noqa: BLE001
         detail = str(e)
         hint = ("FFmpeg's shared libraries are missing — install them with "
-                "'winget install Gyan.FFmpeg.Shared' and restart"
+                f"'{ffmpeg_dlls.install_hint()}' and restart"
                 if "libtorchcodec" in detail else detail[:120])
         rows.append(_line(None, "Audio decoding", hint))
         rows.append(_line(None, "", "voices will not work; unconditioned narration still will"))

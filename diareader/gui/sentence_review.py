@@ -311,7 +311,7 @@ class SentenceReviewDialog(QDialog):
         self.voice_combo = QComboBox()
         self.voice_combo.addItem("Keep each sentence's own voice", None)
         for name in voice.voice_names_in_library_order(settings):
-            self.voice_combo.addItem(name, name)
+            self.voice_combo.addItem(voice.display_name(name), name)
         self.voice_combo.setToolTip(
             "Re-render the ticked sentences in this voice. A voice that reads one "
             "sentence badly often reads it fine on another take, and a different "
@@ -570,7 +570,7 @@ class SentenceReviewDialog(QDialog):
         glance against the markers in the script.
         """
         name = (take.voice if take else self.plan[row].voice) or ""
-        item = QTableWidgetItem(name or "(default)")
+        item = QTableWidgetItem(voice.display_name(name) if name else "(default)")
         item.setTextAlignment(_TOP_LEFT)
         if name:
             item.setBackground(voice_colour(name, self.library))

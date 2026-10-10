@@ -20,6 +20,8 @@ Set-Location $root
 
 $python = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) { throw "No venv at $python — see README section 2." }
+& $python -c "import vieneu, onnxruntime"
+if ($LASTEXITCODE -ne 0) { throw "VieNeu dependencies missing — pip install -r requirements-vieneu.txt" }
 
 # The version comes from the package rather than being repeated here or in the .iss.
 $version = & $python -c "import diareader; print(diareader.__version__)"

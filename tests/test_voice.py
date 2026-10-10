@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from diareader import chunking, config, voice
+from diareader import chunking, config, ffmpeg_dlls, voice
 
 
 def _ref(tmp_path):
@@ -24,7 +24,7 @@ def test_unreadable_reference_audio_fails_before_the_export_starts(tmp_path, mon
 
     message = str(excinfo.value)
     assert "Latradio" in message
-    assert "Gyan.FFmpeg.Shared" in message, "the error must say how to fix it"
+    assert ffmpeg_dlls.install_hint() in message, "the error must say how to fix it"
 
 
 def test_readable_reference_audio_passes(tmp_path, monkeypatch):

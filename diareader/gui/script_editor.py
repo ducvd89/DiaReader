@@ -275,7 +275,7 @@ class VoiceChip(QLabel):
     text-drop handling inserts it wherever it lands — no custom drop logic needed."""
 
     def __init__(self, name: str, library=(), parent=None):
-        super().__init__(name, parent)
+        super().__init__(voice.display_name(name), parent)
         self.name = name
         colour = voice_colour(name, library)
         ink = voice_ink(name, library)
@@ -284,8 +284,9 @@ class VoiceChip(QLabel):
             "padding: 4px 10px; border-radius: 9px;"
         )
         self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.setToolTip(f"Drag into the script, or double-click to insert at the cursor.\n"
-                        f"Everything after it is read by {name}, until the next marker.")
+        self.setToolTip(f"Insert [{name}] into the script.\n"
+                        f"Everything after it is read by {voice.display_name(name)}, "
+                        "until the next marker.")
 
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -422,23 +423,44 @@ class ScriptEditorDialog(QDialog):
             base_colour=self.editor.palette().color(QPalette.ColorRole.Base),
         )
 
-        # Wrapping, not a single row: a library of seventeen voices ran the chips off
-        # the right-hand edge and widened the dialog past the screen with them. The
-        # label goes inside the flow rather than beside it so that the first chip sits
-        # next to it on narrow windows instead of being pushed onto its own line.
-        palette_items = [QLabel("Voices:")]
-        if names:
+        if settings.tts_engine == "vieneu":
+            # The bundled roster has 25 voices. A row of 25 chips would consume most
+            # of the editor, so keep the whole list in a compact picker.
+            self.voice_palette = QWidget()
+            picker_row = QHBoxLayout(self.voice_palette)
+            picker_row.setContentsMargins(0, 0, 0, 0)
+            picker_row.addWidget(QLabel("Insert voice:"))
+            self.voice_picker = QComboBox()
+            self.voice_picker.setMaxVisibleItems(12)
             for name in names:
-                chip = VoiceChip(name, library=names)
-                chip.mouseDoubleClickEvent = (
-                    lambda _e, n=name: self.editor.insert_marker(n)
-                )
-                palette_items.append(chip)
+                self.voice_picker.addItem(voice.display_name(name), name)
+            default = voice.resolve_name(settings, None)
+            if default in names:
+                self.voice_picker.setCurrentIndex(names.index(default))
+            self.voice_picker.setEnabled(bool(names))
+            picker_row.addWidget(self.voice_picker, stretch=1)
+            self.insert_voice_button = QPushButton("Insert marker")
+            self.insert_voice_button.setEnabled(bool(names))
+            self.insert_voice_button.clicked.connect(
+                lambda: self.editor.insert_marker(self.voice_picker.currentData())
+            )
+            picker_row.addWidget(self.insert_voice_button)
         else:
-            hint = QLabel("(no voices configured — add some under Settings → Voices)")
-            hint.setStyleSheet("color: gray;")
-            palette_items.append(hint)
-        self.voice_palette = wrapping_row(palette_items)
+            # Dia libraries are small enough for draggable chips. They wrap at the
+            # available width so the dialog still fits narrow screens.
+            palette_items = [QLabel("Voices:")]
+            if names:
+                for name in names:
+                    chip = VoiceChip(name, library=names)
+                    chip.mouseDoubleClickEvent = (
+                        lambda _e, n=name: self.editor.insert_marker(n)
+                    )
+                    palette_items.append(chip)
+            else:
+                hint = QLabel("(no voices configured — add some under Settings → Voices)")
+                hint.setStyleSheet("color: gray;")
+                palette_items.append(hint)
+            self.voice_palette = wrapping_row(palette_items)
 
         # Was a QGridLayout at a fixed seven columns, which wraps but only ever at that
         # one width: too wide on a narrow window, and leaving empty space on a wide
@@ -456,9 +478,11 @@ class ScriptEditorDialog(QDialog):
 
         self.start_voice_combo = QComboBox()
         if names:
-            self.start_voice_combo.addItems(names)
-            if settings.default_voice in names:
-                self.start_voice_combo.setCurrentText(settings.default_voice)
+            for name in names:
+                self.start_voice_combo.addItem(voice.display_name(name), name)
+            default = voice.resolve_name(settings, None)
+            if default in names:
+                self.start_voice_combo.setCurrentIndex(names.index(default))
         else:
             self.start_voice_combo.addItem("(model default)")
             self.start_voice_combo.setEnabled(False)
@@ -495,14 +519,24 @@ class ScriptEditorDialog(QDialog):
         self.summary.setWordWrap(True)
         start_row.addWidget(self.summary)
 
-        hint = QLabel(
-            "Drag a chip into the text, or double-click it to insert at the cursor. A "
-            "marker applies from where it sits until the next one. Markers are never "
-            "spoken. A marker shown in dark red names a voice that no longer exists.\n"
+        voice_hint = (
+            "Choose a voice above and insert its marker at the cursor. "
+            if settings.tts_engine == "vieneu" else
+            "Drag a chip into the text, or double-click it to insert at the cursor. "
+        )
+        performance_hint = (
+            "Dia's non-verbal directions are skipped by VieNeu."
+            if settings.tts_engine == "vieneu" else
             "Non-verbal tags are performed rather than read out. They come from base "
             "Dia, whose own docs call them unpredictable and say to use them sparingly "
             "— and this Vietnamese fine-tune was not trained on them, so check a short "
             "export before relying on one."
+        )
+        hint = QLabel(
+            voice_hint +
+            "A marker applies from where it sits until the next one. Markers are never "
+            "spoken. A marker shown in dark red names a voice that no longer exists.\n"
+            + performance_hint
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: gray;")
@@ -562,7 +596,8 @@ class ScriptEditorDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self.voice_palette)
         layout.addWidget(self.editor, stretch=1)
-        layout.addWidget(nonverbal_box)
+        if settings.tts_engine != "vieneu":
+            layout.addWidget(nonverbal_box)
         layout.addLayout(start_row)
         layout.addWidget(hint)
         layout.addLayout(button_row)
@@ -719,7 +754,7 @@ class ScriptEditorDialog(QDialog):
         return self._action
 
     def start_voice(self) -> str | None:
-        return self.start_voice_combo.currentText() if self.start_voice_combo.isEnabled() else None
+        return self.start_voice_combo.currentData() if self.start_voice_combo.isEnabled() else None
 
     def script_text(self) -> str:
         return self.editor.toPlainText()

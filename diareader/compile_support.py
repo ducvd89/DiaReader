@@ -244,6 +244,26 @@ def remedy(detail: str) -> str:
     compiler_line = (
         f"Compiler:      {cc}\n" if found else f"Compiler:      none found ({cc})\n"
     )
+    if sys.platform != "win32":
+        # Nothing is bundled here: triton uses the system compiler and the system
+        # Python's headers, both of which a package manager provides.
+        import sysconfig
+
+        python_h = Path(sysconfig.get_paths()["include"]) / "Python.h"
+        install = ("sudo pacman -S gcc python" if Path("/etc/arch-release").exists()
+                   else "a C compiler (gcc) and your Python's development headers")
+        return (
+            "torch.compile is enabled but does not work on this machine, so DiaReader "
+            "stopped rather than generate a book that might come out silent.\n\n"
+            f"{compiler_line}"
+            f"Headers:       {python_h if python_h.is_file() else f'{python_h} MISSING'}\n\n"
+            f"What failed:\n    {detail}\n\n"
+            "torch.compile builds a small C launcher for every GPU kernel it "
+            f"generates, with the system compiler. Install {install}, or set CC to "
+            "the compiler you want and restart DiaReader.\n\n"
+            "The quickest way forward is to turn off 'use_torch_compile' in Settings. "
+            "Generation then runs about 1.56x slower and needs no compiler at all."
+        )
     dirs = bundled_python_build_dirs()
     headers_line = (
         f"Headers:       {dirs[0]}\n" if dirs else

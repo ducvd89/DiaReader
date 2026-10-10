@@ -1,0 +1,11 @@
+# The CUDA build of PyTorch, held in place while everything else installs.
+#
+# Without this, the pinned nari-tts commit asks for torch==2.6.0 (which has no
+# Python 3.14 wheel at all), and anything else that depends on torch is free to
+# swap in PyPI's build. The +cu130 local tag is what pins the index, not just the
+# version number. Measured working on an RTX 5080 Laptop (sm_120), driver 615.
+torch==2.14.1+cu130
+# torchaudio stopped at 2.11; since 2.9 its load() hands decoding to torchcodec,
+# which is what has to match torch. Verified: decodes against the system FFmpeg 9.
+torchaudio==2.11.0+cu130
+torchcodec==0.17.0+cu130

@@ -30,6 +30,33 @@ def test_precision_is_locked_while_the_model_is_loaded(qt_app):
     assert not dlg.precision_combo.isEnabled()
 
 
+def test_vieneu_selection_persists_and_disables_dia_only_options(qt_app):
+    from diareader.gui.settings_dialog import SettingsDialog
+
+    settings = config.Settings()
+    settings.save = lambda: None
+    dlg = SettingsDialog(settings, model_loaded=False)
+    dlg.engine_combo.setCurrentIndex(dlg.engine_combo.findData("vieneu"))
+    dlg.vieneu_voice_combo.setCurrentText("Mai Anh")
+    dlg.vieneu_preset_check.setChecked(False)
+
+    assert not dlg.precision_combo.isEnabled()
+    assert not dlg.compile_check.isEnabled()
+    assert dlg.apply().tts_engine == "vieneu"
+    assert settings.vieneu_voice == "Mai Anh"
+    assert settings.vieneu_use_preset is False
+
+
+def test_engine_is_locked_while_model_loaded(qt_app):
+    from diareader.gui.settings_dialog import SettingsDialog
+
+    settings = config.Settings(tts_engine="vieneu")
+    settings.save = lambda: None
+    dlg = SettingsDialog(settings, model_loaded=True)
+    assert not dlg.engine_combo.isEnabled()
+    assert dlg.apply().tts_engine == "vieneu"
+
+
 def test_locked_precision_keeps_its_stored_value_on_save(qt_app):
     from diareader.gui.settings_dialog import SettingsDialog
 

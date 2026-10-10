@@ -147,3 +147,26 @@ def registered_dir() -> Path | None:
     was never told about.
     """
     return _registered_dir
+
+
+def system_library() -> str | None:
+    """Outside Windows: the libavutil the dynamic loader will hand torchcodec, or None.
+
+    None of the above is needed there — ld.so resolves an extension's dependencies
+    through the ordinary library path, so a distribution's FFmpeg package is simply
+    found. This only answers "is there one", for the selftest and error messages.
+    """
+    if sys.platform == "win32":
+        return None
+    import ctypes.util
+
+    return ctypes.util.find_library("avutil")
+
+
+def install_hint() -> str:
+    """The command that installs FFmpeg's shared libraries on this platform."""
+    if sys.platform == "win32":
+        return "winget install Gyan.FFmpeg.Shared"
+    if Path("/etc/arch-release").exists():
+        return "sudo pacman -S ffmpeg"
+    return "install FFmpeg's shared libraries from your distribution (libavutil and friends)"
