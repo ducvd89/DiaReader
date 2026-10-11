@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 
-from PySide6.QtCore import QMimeData, Qt, Signal
+from PySide6.QtCore import QEvent, QMimeData, Qt, Signal
 from PySide6.QtGui import (
     QColor, QDrag, QFont, QGuiApplication, QPalette, QSyntaxHighlighter, QTextCharFormat,
     QTextCursor
 )
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QLabel,
     QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
 )
 
@@ -265,8 +266,7 @@ class MarkerHighlighter(QSyntaxHighlighter):
 
 
 class VoiceChip(QLabel):
-    """A draggable swatch. Dragging carries the marker text, so the editor's ordinary
-    text-drop handling inserts it wherever it lands — no custom drop logic needed."""
+    """A draggable swatch that inserts a new voice marker into the editor."""
 
     def __init__(self, name: str, library=(), parent=None):
         super().__init__(vieneu_presets.name_for_marker(name) or name, parent)
@@ -296,6 +296,7 @@ class VoiceChip(QLabel):
 MIN_FONT_PT = 7
 MAX_FONT_PT = 36
 DEFAULT_FONT_PT = 11
+_MARKER_DRAG_MIME = "application/x-diareader-script-voice-marker"
 
 
 class ScriptEditor(QPlainTextEdit):
@@ -304,7 +305,142 @@ class ScriptEditor(QPlainTextEdit):
     def __init__(self, parent=None, font_pt: int = DEFAULT_FONT_PT):
         super().__init__(parent)
         self.setAcceptDrops(True)
+        self._pressed_marker: tuple[int, int, str] | None = None
+        self._press_position = None
+        self._dragged_marker: tuple[int, int, str, bytes] | None = None
         self.set_font_size(font_pt)
+
+    def _marker_at(self, position: int) -> tuple[int, int, str] | None:
+        """Find the complete marker under a document position, including its space."""
+        block = self.document().findBlock(position)
+        if not block.isValid():
+            return None
+        for match in chunking.VOICE_MARKER.finditer(block.text()):
+            start = block.position() + match.start()
+            marker_end = block.position() + match.end()
+            if start <= position <= marker_end:
+                end = marker_end + (block.text()[match.end():match.end() + 1] == " ")
+                return start, end, self.toPlainText()[start:end]
+        return None
+
+    def _prepare_marker_drag(self, position: int) -> QMimeData | None:
+        marker = self._marker_at(position)
+        if marker is None:
+            return None
+        token = uuid.uuid4().bytes
+        self._dragged_marker = (*marker, token)
+        mime = QMimeData()
+        mime.setData(_MARKER_DRAG_MIME, token)
+        mime.setText(marker[2])
+        return mime
+
+    def can_accept_marker_drag(self, mime: QMimeData) -> bool:
+        return (
+            self._dragged_marker is not None
+            and mime.hasFormat(_MARKER_DRAG_MIME)
+            and bytes(mime.data(_MARKER_DRAG_MIME)) == self._dragged_marker[3]
+        )
+
+    def _valid_drag_span(self, mime: QMimeData) -> tuple[int, int, str] | None:
+        if not self.can_accept_marker_drag(mime):
+            return None
+        start, end, text, _ = self._dragged_marker
+        if self.toPlainText()[start:end] != text:
+            return None
+        return start, end, text
+
+    def move_dragged_marker(self, mime: QMimeData, target: int) -> bool:
+        span = self._valid_drag_span(mime)
+        if span is None:
+            return False
+        start, end, text = span
+        self._dragged_marker = None
+        if start <= target <= end:
+            return True
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        if target > end:
+            target -= end - start
+        cursor.setPosition(target)
+        cursor.insertText(text)
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        return True
+
+    def remove_dragged_marker(self, mime: QMimeData) -> bool:
+        span = self._valid_drag_span(mime)
+        if span is None:
+            return False
+        start, end, _ = span
+        self._dragged_marker = None
+        cursor = self.textCursor()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        self.setTextCursor(cursor)
+        return True
+
+    def mousePressEvent(self, event) -> None:
+        self._pressed_marker = None
+        if event.button() == Qt.MouseButton.LeftButton:
+            position = self.cursorForPosition(event.position().toPoint()).position()
+            self._pressed_marker = self._marker_at(position)
+            self._press_position = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if (self._pressed_marker is not None
+                and event.buttons() & Qt.MouseButton.LeftButton
+                and (event.position().toPoint() - self._press_position).manhattanLength()
+                >= QApplication.startDragDistance()):
+            start = self._pressed_marker[0]
+            self._pressed_marker = None
+            mime = self._prepare_marker_drag(start)
+            if mime is not None:
+                drag = QDrag(self)
+                drag.setMimeData(mime)
+                drag.exec(Qt.DropAction.MoveAction)
+                self._dragged_marker = None
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._pressed_marker = None
+        super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasFormat(_MARKER_DRAG_MIME):
+            if self.can_accept_marker_drag(event.mimeData()):
+                event.setDropAction(Qt.DropAction.MoveAction)
+                event.accept()
+            else:
+                event.ignore()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasFormat(_MARKER_DRAG_MIME):
+            if self.can_accept_marker_drag(event.mimeData()):
+                event.setDropAction(Qt.DropAction.MoveAction)
+                event.accept()
+            else:
+                event.ignore()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        if event.mimeData().hasFormat(_MARKER_DRAG_MIME):
+            target = self.cursorForPosition(event.position().toPoint()).position()
+            if self.move_dragged_marker(event.mimeData(), target):
+                event.setDropAction(Qt.DropAction.MoveAction)
+                event.accept()
+            else:
+                event.ignore()
+            return
+        super().dropEvent(event)
 
     def set_font_size(self, points: int) -> None:
         points = max(MIN_FONT_PT, min(MAX_FONT_PT, int(points)))
@@ -420,7 +556,7 @@ class ScriptEditorDialog(QDialog):
         # Keep the source editor's coloured, draggable tags for both engines. The
         # VieNeu library is much larger, so its palette scrolls instead of taking
         # the chapter text's editing space.
-        palette_items = [QLabel("Voices:")]
+        palette_items = [QLabel("Voices · drop tag here to remove:")]
         self.voice_chips: dict[str, VoiceChip] = {}
         if names:
             for name in names:
@@ -446,6 +582,17 @@ class ScriptEditorDialog(QDialog):
             self.voice_palette_area.setFrameShape(QScrollArea.Shape.NoFrame)
         else:
             self.voice_palette_area = self.voice_palette
+
+        # Each chip receives drag events over its own rectangle, so the whole voice
+        # list (including the scroll area's viewport) has to accept a marker drop.
+        self._marker_drop_targets = set(palette_items)
+        self._marker_drop_targets.add(self.voice_palette)
+        self._marker_drop_targets.add(self.voice_palette_area)
+        if isinstance(self.voice_palette_area, QScrollArea):
+            self._marker_drop_targets.add(self.voice_palette_area.viewport())
+        for target in self._marker_drop_targets:
+            target.setAcceptDrops(True)
+            target.installEventFilter(self)
 
         # Was a QGridLayout at a fixed seven columns, which wraps but only ever at that
         # one width: too wide on a narrow window, and leaving empty space on a wide
@@ -511,7 +658,10 @@ class ScriptEditorDialog(QDialog):
         self.summary.setWordWrap(True)
         start_row.addWidget(self.summary)
 
-        voice_hint = "Drag a coloured voice tag into the text, or double-click it to insert at the cursor. "
+        voice_hint = (
+            "Drag a coloured voice tag into the text, or double-click it to insert at the cursor. "
+            "Drag a tag already in the text to move it; drop it on the voice list to remove it. "
+        )
         performance_hint = (
             "Dia's non-verbal directions are skipped by VieNeu."
             if settings.tts_engine == "vieneu" else
@@ -593,6 +743,23 @@ class ScriptEditorDialog(QDialog):
         self._fit_to_screen()
 
         self._install_signal_handlers()
+
+    def eventFilter(self, watched, event) -> bool:
+        if (watched in self._marker_drop_targets
+                and event.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove,
+                                     QEvent.Type.Drop)
+                and event.mimeData().hasFormat(_MARKER_DRAG_MIME)):
+            if not self.editor.can_accept_marker_drag(event.mimeData()):
+                event.ignore()
+                return True
+            if event.type() == QEvent.Type.Drop:
+                if not self.editor.remove_dragged_marker(event.mimeData()):
+                    event.ignore()
+                    return True
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
 
     def _fit_to_screen(self) -> None:
         """Never open larger than the screen it opens on.

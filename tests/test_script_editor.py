@@ -268,6 +268,69 @@ def test_insert_marker_puts_a_usable_tag_in_the_text(qt_app):
     assert chunking.VOICE_MARKER.search(text)
 
 
+@pytest.mark.parametrize("destination", ["before", "after"])
+def test_dragging_an_existing_marker_moves_it_without_copying(qt_app, destination):
+    from diareader.gui.script_editor import ScriptEditor
+
+    original = "Câu đầu. [GiongNu2] Câu giữa. Câu cuối."
+    editor = ScriptEditor()
+    editor.setPlainText(original)
+    mime = editor._prepare_marker_drag(original.index("[GiongNu2]") + 2)
+    assert mime is not None
+    target = 0 if destination == "before" else len(original)
+
+    assert editor.move_dragged_marker(mime, target)
+    moved = editor.toPlainText()
+    assert moved.count("[GiongNu2]") == 1
+    if destination == "before":
+        assert moved.startswith("[GiongNu2] ")
+    else:
+        assert moved.endswith("[GiongNu2] ")
+    assert [c.voice for c in chunking.chunk_text_with_voices(moved, start_voice="Latradio")] == (
+        ["GiongNu2"] * 3 if destination == "before"
+        else ["Latradio"] * 3
+    )
+    editor.undo()
+    assert editor.toPlainText() == original
+
+
+def test_dragging_a_marker_onto_itself_leaves_it_in_place(qt_app):
+    from diareader.gui.script_editor import ScriptEditor
+
+    text = "Đầu. [GiongNu2] Cuối."
+    editor = ScriptEditor()
+    editor.setPlainText(text)
+    start = text.index("[GiongNu2]")
+    mime = editor._prepare_marker_drag(start)
+
+    assert editor.move_dragged_marker(mime, start + 3)
+    assert editor.toPlainText() == text
+
+
+@pytest.mark.parametrize("engine", ["dia", "vieneu"])
+def test_dropping_editor_marker_on_voice_list_removes_it(qt_app, engine):
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QDropEvent
+
+    from diareader.gui.script_editor import ScriptEditorDialog
+
+    text = "Đầu. [GiongNu2] Cuối."
+    dlg = ScriptEditorDialog(config.Settings(tts_engine=engine), "Ch", text)
+    mime = dlg.editor._prepare_marker_drag(text.index("[GiongNu2]") + 1)
+    assert mime is not None
+    event = QDropEvent(
+        QPointF(5, 5), Qt.DropAction.MoveAction, mime,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    )
+    target = next(iter(dlg.voice_chips.values())) if dlg.voice_chips else dlg.voice_palette
+    assert target.acceptDrops()
+
+    assert dlg.eventFilter(target, event)
+    assert event.isAccepted()
+    assert dlg.script_text() == "Đầu. Cuối."
+    assert dlg.dirty_label.text() == "Unsaved changes"
+
+
 def test_vieneu_script_keeps_every_coloured_voice_tag(qt_app):
     from diareader.gui.script_editor import ScriptEditorDialog, voice_colour, voice_span_tint
     from diareader.vieneu_presets import marker_for_name, presets
