@@ -16,10 +16,10 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QLabel,
-    QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
 )
 
-from .. import chunking, config, vn_numbers, voice
+from .. import chunking, config, vn_numbers, voice, vieneu_presets
 from .flow_layout import wrapping_row
 
 log = logging.getLogger(__name__)
@@ -275,7 +275,7 @@ class VoiceChip(QLabel):
     text-drop handling inserts it wherever it lands — no custom drop logic needed."""
 
     def __init__(self, name: str, library=(), parent=None):
-        super().__init__(voice.display_name(name), parent)
+        super().__init__(vieneu_presets.name_for_marker(name) or name, parent)
         self.name = name
         colour = voice_colour(name, library)
         ink = voice_ink(name, library)
@@ -423,44 +423,35 @@ class ScriptEditorDialog(QDialog):
             base_colour=self.editor.palette().color(QPalette.ColorRole.Base),
         )
 
-        if settings.tts_engine == "vieneu":
-            # The bundled roster has 25 voices. A row of 25 chips would consume most
-            # of the editor, so keep the whole list in a compact picker.
-            self.voice_palette = QWidget()
-            picker_row = QHBoxLayout(self.voice_palette)
-            picker_row.setContentsMargins(0, 0, 0, 0)
-            picker_row.addWidget(QLabel("Insert voice:"))
-            self.voice_picker = QComboBox()
-            self.voice_picker.setMaxVisibleItems(12)
+        # Keep the source editor's coloured, draggable tags for both engines. The
+        # VieNeu library is much larger, so its palette scrolls instead of taking
+        # the chapter text's editing space.
+        palette_items = [QLabel("Voices:")]
+        self.voice_chips: dict[str, VoiceChip] = {}
+        if names:
             for name in names:
-                self.voice_picker.addItem(voice.display_name(name), name)
-            default = voice.resolve_name(settings, None)
-            if default in names:
-                self.voice_picker.setCurrentIndex(names.index(default))
-            self.voice_picker.setEnabled(bool(names))
-            picker_row.addWidget(self.voice_picker, stretch=1)
-            self.insert_voice_button = QPushButton("Insert marker")
-            self.insert_voice_button.setEnabled(bool(names))
-            self.insert_voice_button.clicked.connect(
-                lambda: self.editor.insert_marker(self.voice_picker.currentData())
-            )
-            picker_row.addWidget(self.insert_voice_button)
+                chip = VoiceChip(name, library=names)
+                chip.mouseDoubleClickEvent = (
+                    lambda _e, n=name: self.editor.insert_marker(n)
+                )
+                self.voice_chips[name] = chip
+                palette_items.append(chip)
         else:
-            # Dia libraries are small enough for draggable chips. They wrap at the
-            # available width so the dialog still fits narrow screens.
-            palette_items = [QLabel("Voices:")]
-            if names:
-                for name in names:
-                    chip = VoiceChip(name, library=names)
-                    chip.mouseDoubleClickEvent = (
-                        lambda _e, n=name: self.editor.insert_marker(n)
-                    )
-                    palette_items.append(chip)
-            else:
-                hint = QLabel("(no voices configured — add some under Settings → Voices)")
-                hint.setStyleSheet("color: gray;")
-                palette_items.append(hint)
-            self.voice_palette = wrapping_row(palette_items)
+            hint = QLabel("(no voices configured — add some under Settings → Voices)")
+            hint.setStyleSheet("color: gray;")
+            palette_items.append(hint)
+        self.voice_palette = wrapping_row(palette_items)
+        if settings.tts_engine == "vieneu":
+            self.voice_palette_area = QScrollArea()
+            self.voice_palette_area.setWidgetResizable(True)
+            self.voice_palette_area.setWidget(self.voice_palette)
+            self.voice_palette_area.setMaximumHeight(140)
+            self.voice_palette_area.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            self.voice_palette_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        else:
+            self.voice_palette_area = self.voice_palette
 
         # Was a QGridLayout at a fixed seven columns, which wraps but only ever at that
         # one width: too wide on a narrow window, and leaving empty space on a wide
@@ -480,6 +471,13 @@ class ScriptEditorDialog(QDialog):
         if names:
             for name in names:
                 self.start_voice_combo.addItem(voice.display_name(name), name)
+                index = self.start_voice_combo.count() - 1
+                self.start_voice_combo.setItemData(
+                    index, voice_colour(name, names), Qt.ItemDataRole.BackgroundRole
+                )
+                self.start_voice_combo.setItemData(
+                    index, voice_ink(name, names), Qt.ItemDataRole.ForegroundRole
+                )
             default = voice.resolve_name(settings, None)
             if default in names:
                 self.start_voice_combo.setCurrentIndex(names.index(default))
@@ -519,11 +517,7 @@ class ScriptEditorDialog(QDialog):
         self.summary.setWordWrap(True)
         start_row.addWidget(self.summary)
 
-        voice_hint = (
-            "Choose a voice above and insert its marker at the cursor. "
-            if settings.tts_engine == "vieneu" else
-            "Drag a chip into the text, or double-click it to insert at the cursor. "
-        )
+        voice_hint = "Drag a coloured voice tag into the text, or double-click it to insert at the cursor. "
         performance_hint = (
             "Dia's non-verbal directions are skipped by VieNeu."
             if settings.tts_engine == "vieneu" else
@@ -594,7 +588,7 @@ class ScriptEditorDialog(QDialog):
         button_row.addWidget(self.close_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self.voice_palette)
+        layout.addWidget(self.voice_palette_area)
         layout.addWidget(self.editor, stretch=1)
         if settings.tts_engine != "vieneu":
             layout.addWidget(nonverbal_box)

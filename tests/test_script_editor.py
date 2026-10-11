@@ -266,18 +266,19 @@ def test_insert_marker_puts_a_usable_tag_in_the_text(qt_app):
     assert chunking.VOICE_MARKER.search(text)
 
 
-def test_vieneu_script_picker_inserts_selected_preset(qt_app):
-    from diareader.gui.script_editor import ScriptEditorDialog
+def test_vieneu_script_keeps_every_coloured_voice_tag(qt_app):
+    from diareader.gui.script_editor import ScriptEditorDialog, voice_colour
     from diareader.vieneu_presets import marker_for_name, presets
 
     dlg = ScriptEditorDialog(
         config.Settings(tts_engine="vieneu"), "Chương 1", "Xin chào."
     )
-    assert dlg.voice_picker.count() == len(presets())
-    index = dlg.voice_picker.findData(marker_for_name("Mai Anh"))
-    assert index >= 0
-    dlg.voice_picker.setCurrentIndex(index)
-    dlg.insert_voice_button.click()
+    assert len(dlg.voice_chips) == len(presets())
+    assert dlg.voice_palette.layout().count() == len(presets()) + 1
+    marker = marker_for_name("Mai Anh")
+    chip = dlg.voice_chips[marker]
+    assert chip.styleSheet().find(voice_colour(marker, list(dlg.voice_chips)).name()) >= 0
+    chip.mouseDoubleClickEvent(None)
     assert f"[{marker_for_name('Mai Anh')}]" in dlg.editor.toPlainText()
 
 

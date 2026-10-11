@@ -310,8 +310,15 @@ class SentenceReviewDialog(QDialog):
 
         self.voice_combo = QComboBox()
         self.voice_combo.addItem("Keep each sentence's own voice", None)
-        for name in voice.voice_names_in_library_order(settings):
+        for name in self.library:
             self.voice_combo.addItem(voice.display_name(name), name)
+            index = self.voice_combo.count() - 1
+            self.voice_combo.setItemData(
+                index, voice_colour(name, self.library), Qt.ItemDataRole.BackgroundRole
+            )
+            self.voice_combo.setItemData(
+                index, voice_ink(name, self.library), Qt.ItemDataRole.ForegroundRole
+            )
         self.voice_combo.setToolTip(
             "Re-render the ticked sentences in this voice. A voice that reads one "
             "sentence badly often reads it fine on another take, and a different "
@@ -520,8 +527,16 @@ class SentenceReviewDialog(QDialog):
 
         picker = QComboBox()
         for number, take in enumerate([current] + others, start=1):
-            label = f"{number}. {take.voice or 'default'} · {take.score * 100:.0f}%"
+            label = f"{number}. {voice.display_name(take.voice) if take.voice else 'default'} · {take.score * 100:.0f}%"
             picker.addItem(label, take.wav)
+            if take.voice:
+                index = picker.count() - 1
+                picker.setItemData(
+                    index, voice_colour(take.voice, self.library), Qt.ItemDataRole.BackgroundRole
+                )
+                picker.setItemData(
+                    index, voice_ink(take.voice, self.library), Qt.ItemDataRole.ForegroundRole
+                )
         picker.setCurrentIndex(0)
         picker.setToolTip("Which rendering of this sentence goes into the final file.")
         picker.currentIndexChanged.connect(

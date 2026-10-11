@@ -254,6 +254,20 @@ def test_the_voice_wears_the_colour_it_wears_in_the_editor(qt_app, cache, voiced
     assert cell.foreground().color() == script_editor.voice_ink("Latradio", library)
 
 
+def test_vieneu_voice_colours_match_source_script(qt_app, cache, settings):
+    settings.tts_engine = "vieneu"
+    plan = _plan(settings)
+    dialog = SentenceReviewDialog(plan, cache, settings)
+    name = plan[0].voice
+    library = voice.voice_names_in_library_order(settings)
+
+    cell = dialog.table.item(0, COL_VOICE)
+    assert cell.background().color() == script_editor.voice_colour(name, library)
+    index = dialog.voice_combo.findData(name)
+    assert index >= 0
+    assert dialog.voice_combo.itemData(index, Qt.ItemDataRole.BackgroundRole) == cell.background().color()
+
+
 def test_the_voice_keeps_its_colour_on_a_failed_row(qt_app, cache, voiced_settings):
     """The red says "this take is wrong"; the swatch says "in this voice". Losing the
     second under the first is exactly when it is most wanted — recasting a sentence is
