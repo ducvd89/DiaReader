@@ -34,9 +34,11 @@ def test_every_voice_gets_a_different_colour(qt_app):
     colours = {voice_colour(n, names).name() for n in names}
     assert len(colours) == len(names), f"colour collision among {names}: {colours}"
 
-    # and the whole palette stays collision-free up to its own length
+    # The extended palette covers all presets and a sizeable custom library.
     full = [f"V{i}" for i in range(len(_PALETTE))]
     assert len({voice_colour(n, full).name() for n in full}) == len(_PALETTE)
+    expanded = [f"V{i}" for i in range(len(_PALETTE) + 16)]
+    assert len({voice_colour(n, expanded).name() for n in expanded}) == len(expanded)
 
 
 def test_unknown_voice_is_not_painted_as_a_real_one(qt_app):
@@ -81,7 +83,7 @@ def test_no_realistic_voice_count_lands_on_the_error_red(qt_app):
     # the error red on purpose-by-necessity, which is exactly why the error marker
     # also carries a wave underline (see the next test). Asserting otherwise here
     # would be asserting something no palette can deliver.
-    warm_tail = [delta_e(c, _UNKNOWN_COLOUR) for c in _PALETTE[6:]]
+    warm_tail = [delta_e(c, _UNKNOWN_COLOUR) for c in _PALETTE[6:8]]
     assert all(d < 15 for d in warm_tail), (
         "slots 7-8 became hue-separable from the error red; if that is real, tighten "
         "this test — but check it is not the error colour that drifted"
@@ -267,7 +269,7 @@ def test_insert_marker_puts_a_usable_tag_in_the_text(qt_app):
 
 
 def test_vieneu_script_keeps_every_coloured_voice_tag(qt_app):
-    from diareader.gui.script_editor import ScriptEditorDialog, voice_colour
+    from diareader.gui.script_editor import ScriptEditorDialog, voice_colour, voice_span_tint
     from diareader.vieneu_presets import marker_for_name, presets
 
     dlg = ScriptEditorDialog(
@@ -275,6 +277,11 @@ def test_vieneu_script_keeps_every_coloured_voice_tag(qt_app):
     )
     assert len(dlg.voice_chips) == len(presets())
     assert dlg.voice_palette.layout().count() == len(presets()) + 1
+    assert len({voice_colour(name, list(dlg.voice_chips)).name()
+                for name in dlg.voice_chips}) == len(presets())
+    for background in (QColorClass("#1e1e1e"), QColorClass("#ffffff")):
+        assert len({voice_span_tint(name, list(dlg.voice_chips), background).name()
+                    for name in dlg.voice_chips}) == len(presets())
     marker = marker_for_name("Mai Anh")
     chip = dlg.voice_chips[marker]
     assert chip.styleSheet().find(voice_colour(marker, list(dlg.voice_chips)).name()) >= 0

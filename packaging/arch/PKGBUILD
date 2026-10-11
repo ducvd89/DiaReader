@@ -12,7 +12,7 @@
 
 pkgname=diareader
 pkgver=1.2.2
-pkgrel=3
+pkgrel=4
 pkgdesc="Turn .txt/.epub books into Vietnamese audiobooks with Dia or VieNeu TTS"
 arch=('x86_64')
 url="https://github.com/ducvd89/DiaReader"

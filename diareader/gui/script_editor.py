@@ -24,58 +24,30 @@ from .flow_layout import wrapping_row
 
 log = logging.getLogger(__name__)
 
-# Hues and their order are both load-bearing, and both were computed rather than
-# picked by eye (OKLab ΔE×100 under Machado-Oliveira-Fernandes colour-blindness
-# simulation). Two markers can sit anywhere relative to each other in a script, so
-# EVERY pair has to be separable, not just neighbours — the first five slots clear
-# that all-pairs bar with room to spare (worst pair: CVD ΔE 13.0, normal-vision
-# 16.3, against gates of 8 and 15). Slots 6-8 exist so a large library still gets
-# distinct colours; they only clear the weaker adjacent bar, which is fine because
-# a marker always spells its voice name out — colour is a scanning aid here, never
-# the sole carrier of identity.
-#
-# What this replaced: colours used to come from `md5(name) % len(palette)`, which
-# collided — "Latradio" and "NuMN1" both landed on #f6bd60, i.e. two different
-# voices rendered identically. Positional assignment cannot collide at all, and
-# because voices are numbered in library order (append-only), adding a voice hands
-# it the next free slot instead of recolouring the ones already in use.
-#
-# The first FOUR are additionally the best set for the dark theme this app usually
-# renders in: requiring each swatch to clear 3:1 against a dark editor background
-# leaves exactly blue/yellow/magenta/green as the largest set that still clears the
-# all-pairs bar. No five-hue set satisfies both, so slot 5 onward trades one for the
-# other — violet sits there deliberately, because it separates cleanly from the
-# first four and merely looks dim, whereas the brighter alternatives (red beside
-# magenta) are the confusable kind of wrong this palette exists to prevent. Its
-# white ink reads at 8.56:1, the highest of any swatch, so the marker text stays
-# legible even where the block itself is quiet.
-#
-# Red sits LAST, not sixth, and that is a correctness fix rather than taste. The
-# marker for a voice that no longer exists is painted #d03b3b, and series red
-# #e34948 measures ΔE 4.8 from it — two near-identical reds meaning "a real voice"
-# and "this voice is gone". A sixth voice hit that in practice. Aqua takes slot 6
-# instead: ΔE 31.9 from the error colour, and it is the only candidate that also
-# clears the normal-vision floor there (15.6 against red's 13.2 and orange's 12.9).
+# The first eight colours are the original Dia palette, in its original order: a
+# user's existing voice keeps its colour. The rest were selected greedily from a
+# moderate-saturation HSV grid by maximum minimum OKLab distance from all previous
+# swatches. VieNeu's 25 presets (and many custom voices) now each get a distinct
+# colour instead of repeating every eight slots. Names remain visible because a
+# large categorical palette cannot make every pair unmistakable by colour alone.
 _PALETTE = [
-    "#2a78d6",  # blue
-    "#eda100",  # yellow
-    "#e87ba4",  # magenta
-    "#008300",  # green
-    "#4a3aa7",  # violet
-    "#1baf7a",  # aqua
-    "#eb6834",  # orange
-    "#e34948",  # red — last, see above
+    "#2a78d6", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#1baf7a", "#eb6834", "#e34948",
+    "#bc2feb", "#6deb2f", "#85362e", "#75d7eb", "#a82287", "#857442", "#66a2cc", "#1b7c85",
+    "#eb2fac", "#9375eb", "#b3cc66", "#7d2feb", "#a89a54", "#2febac", "#7e54a8", "#2f2feb",
+    "#a85469", "#d775eb", "#1b5885", "#29cc52", "#762e85", "#eb9375", "#7ba822", "#29ccb1",
+    "#eb2feb", "#cc296d", "#ebc375", "#a84f22", "#a8224f", "#428553", "#5252eb", "#cc66b3",
+    "#854269", "#5469a8", "#eb5285", "#229da8", "#a854a1", "#2fbceb", "#5292eb", "#9547cc",
+    "#5485a8", "#9222a8", "#cc8066", "#cc2929", "#cc29be", "#22a822", "#5f29cc", "#7c851b",
+    "#cc6677", "#ccaa66", "#85581b", "#6f66cc", "#a86954", "#66cc80", "#a87b22", "#cc8829",
 ]
 
-# Chosen per hue by measured WCAG contrast against the swatch itself rather than a
-# single global ink: #4a3aa7 with dark text is 2.45:1 (unreadable), with white 8.56:1.
-# Black here is pure #000000 rather than a softened near-black — on the blue swatch
-# #111111 measures 4.28:1 and #000000 measures 4.76:1, which is the difference
-# between failing and clearing the 4.5:1 bar. Worst pairing below is 4.76:1.
-_PALETTE_INK = [
-    "#000000", "#000000", "#000000", "#ffffff",
-    "#ffffff", "#000000", "#000000", "#000000",
-]
+def _ink_for(colour: QColor) -> QColor:
+    """Choose black or white text with the higher WCAG contrast on a swatch."""
+    channels = (colour.redF(), colour.greenF(), colour.blueF())
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+              for c in channels]
+    luminance = sum(a * b for a, b in zip((0.2126, 0.7152, 0.0722), linear))
+    return QColor("#000000" if luminance > 0.179 else "#ffffff")
 
 # Deliberately outside the palette above: a marker naming a voice that no longer
 # exists is an error state, not a ninth voice.
@@ -88,26 +60,48 @@ _PALETTE_INK = [
 # read by someone who cannot separate the two reds at all.
 _UNKNOWN_COLOUR = "#d03b3b"
 _UNKNOWN_INK = "#ffffff"
+_EXTRA_PALETTE: list[str] = []
+
+
+def _colour_at(slot: int) -> QColor:
+    if slot < len(_PALETTE):
+        return QColor(_PALETTE[slot])
+    # Very large custom libraries continue with unique colours. Keep this sequence
+    # append-only so adding another voice never recolours an existing marker.
+    used = set(_PALETTE) | set(_EXTRA_PALETTE) | {_UNKNOWN_COLOUR}
+    while len(_EXTRA_PALETTE) <= slot - len(_PALETTE):
+        index = len(_EXTRA_PALETTE)
+        hue = (index * 137 + 17) % 360
+        saturation = (160, 195, 230)[(index // 360) % 3]
+        value = (180, 210, 240)[(index // 1080) % 3]
+        for offset in range(360):
+            candidate = QColor.fromHsv((hue + offset) % 360, saturation, value).name()
+            if candidate not in used:
+                _EXTRA_PALETTE.append(candidate)
+                used.add(candidate)
+                break
+        else:
+            raise ValueError("Voice palette exhausted")
+    return QColor(_EXTRA_PALETTE[slot - len(_PALETTE)])
 
 
 def voice_slot(name: str, library: "list[str] | tuple[str, ...]") -> int | None:
-    """Palette slot for a voice: its position in the library, wrapping if the
-    library outgrows the palette. None for a name the library doesn't contain."""
+    """Palette slot for a voice, or None if it is not in the library."""
     try:
-        return library.index(name) % len(_PALETTE)
+        return library.index(name)
     except ValueError:
         return None
 
 
 def voice_colour(name: str, library: "list[str] | tuple[str, ...]" = ()) -> QColor:
     slot = voice_slot(name, library)
-    return QColor(_UNKNOWN_COLOUR if slot is None else _PALETTE[slot])
+    return QColor(_UNKNOWN_COLOUR) if slot is None else _colour_at(slot)
 
 
 def voice_ink(name: str, library: "list[str] | tuple[str, ...]" = ()) -> QColor:
     """Text colour to lay over `voice_colour(name)`."""
     slot = voice_slot(name, library)
-    return QColor(_UNKNOWN_INK if slot is None else _PALETTE_INK[slot])
+    return QColor(_UNKNOWN_INK) if slot is None else _ink_for(_colour_at(slot))
 
 
 # How much of a voice's hue to mix into the background of the text it reads. Enough
